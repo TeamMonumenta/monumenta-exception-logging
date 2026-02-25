@@ -1,0 +1,7 @@
+[versions]
+gson = "2.8.5"
+log4j = "2.20.0"
+
+[libraries]
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+log4jCore = { module = "org.apache.logging.log4j:log4j-core", version.ref = "log4j" }
