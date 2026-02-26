@@ -15,7 +15,6 @@ monumenta {
 	paper(
 		"com.playmonumenta.exceptionreporter.ExceptionReporterPlugin",
 		BukkitPluginDescription.PluginLoadOrder.STARTUP,
-		"1.20.4",
-		apiJarVersion = "1.20.4-R0.1-SNAPSHOT"
+		"1.18",
 	)
 }
