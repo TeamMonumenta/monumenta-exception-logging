@@ -7,10 +7,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.config.Configuration;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.jetbrains.annotations.Nullable;
 
 public class ExceptionReporterPlugin extends JavaPlugin {
-	private ExceptionAppender mAppender;
-	private HttpSender mSender;
+	private @Nullable ExceptionAppender mAppender;
+	private @Nullable HttpSender mSender;
 
 	@Override
 	public void onEnable() {
@@ -36,7 +37,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 		}
 
 		mSender = new HttpSender(ingestUrl, getLogger());
-		mAppender = new ExceptionAppender(serverName, mSender, getLogger());
+		mAppender = new ExceptionAppender(serverName, mSender);
 		mAppender.start();
 
 		LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
