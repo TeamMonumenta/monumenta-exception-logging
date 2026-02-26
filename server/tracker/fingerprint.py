@@ -1,5 +1,6 @@
 import hashlib
 import re
+from typing import Any
 
 _UUID_RE = re.compile(
     r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
@@ -23,8 +24,8 @@ def normalize_message(message: str) -> str:
 
 
 def extract_app_frames(
-    frames: list[dict], app_packages: list[str], count: int
-) -> list[dict]:
+    frames: list[dict[str, Any]], app_packages: list[str], count: int
+) -> list[dict[str, Any]]:
     result = [
         f for f in frames
         if any(f.get('class_name', '').startswith(pkg) for pkg in app_packages)
@@ -35,7 +36,7 @@ def extract_app_frames(
 
 
 def compute_fingerprint(
-    exception_class: str, normalized_message: str, top_frames: list[dict]
+    exception_class: str, normalized_message: str, top_frames: list[dict[str, Any]]
 ) -> str:
     frame_str = '|'.join(
         f"{f['class_name']}.{f['method']}" for f in top_frames

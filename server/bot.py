@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from tracker.api import GroupDetails, GroupSummary, Tracker
+from tracker.api import FrameSummary, GroupDetails, GroupSummary, Tracker
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ _MAX_MSG_LEN = 2000
 # Message formatting
 # ---------------------------------------------------------------------------
 
-def _fmt_frame(frame) -> str:
+def _fmt_frame(frame: FrameSummary) -> str:
     file_info = f"{frame.file}:{frame.line}" if frame.file else "Unknown"
     return f"  at {frame.class_name}.{frame.method}({file_info})"
 

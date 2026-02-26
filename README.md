@@ -117,18 +117,26 @@ ingest service is not exposed outside the cluster.
 ### Python server
 
 ```bash
-# Install dependencies (from repo root)
-python -m venv .venv && .venv/bin/pip install -r server/requirements.txt
+cd server
 
-# Run tests
-cd server && ../.venv/bin/python -m pytest tests/ -q
+# Create .venv and install runtime + dev dependencies
+make venv
 
-# Lint
-cd server && ../.venv/bin/pylint tracker/ server.py bot.py tests/
+# Run all checks (pylint → pyright → pytest); stops at first failure
+make test
+
+# Individual targets
+make lint       # pylint
+make typecheck  # pyright (strict)
+make pytest     # pytest
 
 # Run server (Discord disabled if DISCORD_TOKEN is unset)
-cd server && python server.py
+python server.py
 ```
+
+Runtime dependencies are in `server/requirements.txt`; dev/test dependencies (pytest, pylint,
+pyright) are in `server/requirements-dev.txt`. The `make venv` target creates `.venv` inside
+`server/` and installs both. It re-runs automatically if either requirements file changes.
 
 ### Java plugin
 

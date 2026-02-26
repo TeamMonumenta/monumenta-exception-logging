@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel
 
@@ -37,7 +37,7 @@ class IngestEvent(BaseModel):
     exception: ExceptionModel
 
 
-def parse_event(raw: dict) -> IngestEvent:
+def parse_event(raw: dict[str, Any]) -> IngestEvent:
     return IngestEvent.model_validate(raw)
 
 

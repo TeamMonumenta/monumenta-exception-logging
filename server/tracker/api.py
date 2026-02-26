@@ -142,7 +142,7 @@ class Tracker:
                LIMIT ?""",
             (cutoff, limit)
         ).fetchall()
-        result = []
+        result: list[GroupSummary] = []
         for row in rows:
             server_counts = self._get_server_counts(row['id'], cutoff)
             result.append(_row_to_summary(row, row['recent_count'], server_counts))
@@ -163,7 +163,7 @@ class Tracker:
                ORDER BY first_seen DESC""",
             (cutoff,)
         ).fetchall()
-        result = []
+        result: list[GroupSummary] = []
         for row in rows:
             recent_count_row = self._conn.execute(
                 """SELECT COALESCE(SUM(count), 0) AS cnt
@@ -251,7 +251,7 @@ class Tracker:
                LIMIT ?""",
             (server_id, cutoff, limit)
         ).fetchall()
-        result = []
+        result: list[GroupSummary] = []
         for row in rows:
             server_counts = self._get_server_counts(row['id'], cutoff)
             result.append(_row_to_summary(row, row['recent_count'], server_counts))
@@ -274,7 +274,7 @@ class Tracker:
                LIMIT ?""",
             (pattern, pattern, limit)
         ).fetchall()
-        result = []
+        result: list[GroupSummary] = []
         for row in rows:
             recent_count_row = self._conn.execute(
                 """SELECT COALESCE(SUM(count), 0) AS cnt
@@ -297,7 +297,7 @@ class Tracker:
                LIMIT ?""",
             (status, limit)
         ).fetchall()
-        result = []
+        result: list[GroupSummary] = []
         for row in rows:
             recent_count_row = self._conn.execute(
                 """SELECT COALESCE(SUM(count), 0) AS cnt
