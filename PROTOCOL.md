@@ -5,7 +5,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 ## Transport
 
 - **Method:** `HTTP POST`
-- **Endpoint:** Configured via `INGEST_URL` environment variable on the server (e.g. `http://exception-tracker.internal/ingest`)
+- **Endpoint:** Configured via `EXCEPTLOG_INGEST_URL` environment variable on the server (e.g. `http://exception-tracker.internal/ingest`)
 - **Content-Type:** `application/json`
 - **Authentication:** None. The ingest server listens on plain HTTP with no auth. Security is provided entirely by the Kubernetes network boundary — the service is not exposed outside the cluster. This avoids per-request TLS/crypto overhead and removes secret management from the plugin.
 - **Fire-and-forget:** The plugin does not retry on failure and does not block the server thread. Failures are silently dropped after logging a single warning.
@@ -44,7 +44,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | Field | Type | Description |
 |---|---|---|
 | `schema_version` | integer | Always `1` for this version. Used by the server to handle future format changes. |
-| `server_id` | string | Identifies the originating server. Read from `SERVER_NAME` env var at plugin startup. Falls back to hostname if env var is absent. |
+| `server_id` | string | Identifies the originating server. Read from `EXCEPTLOG_SERVER_NAME` env var at plugin startup. Falls back to hostname if env var is absent. |
 | `timestamp_ms` | integer | Unix timestamp in milliseconds (UTC) when the log event was emitted. From `LogEvent.getTimeMillis()`. |
 | `level` | string | Log level string. Will always be `"ERROR"` in practice since the plugin only captures ERROR-level events, but included for completeness. |
 | `logger` | string | The Log4j2 logger name that emitted the event. Typically the fully-qualified plugin class name, e.g. `com.playmonumenta.plugins.Plugin`. |

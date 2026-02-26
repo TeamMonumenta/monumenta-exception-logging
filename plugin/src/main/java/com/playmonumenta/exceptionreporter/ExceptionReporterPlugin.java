@@ -14,19 +14,19 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 
 	@Override
 	public void onEnable() {
-		String ingestUrl = System.getenv("INGEST_URL");
+		String ingestUrl = System.getenv("EXCEPTLOG_INGEST_URL");
 		if (ingestUrl == null || ingestUrl.isBlank()) {
-			getLogger().severe("INGEST_URL env var not set — exception reporting disabled.");
+			getLogger().severe("EXCEPTLOG_INGEST_URL env var not set — exception reporting disabled.");
 			return;
 		}
 		try {
 			new java.net.URI(ingestUrl);
 		} catch (java.net.URISyntaxException e) {
-			getLogger().severe("INGEST_URL is not a valid URI: " + e.getMessage());
+			getLogger().severe("EXCEPTLOG_INGEST_URL is not a valid URI: " + e.getMessage());
 			return;
 		}
 
-		String serverName = System.getenv("SERVER_NAME");
+		String serverName = System.getenv("EXCEPTLOG_SERVER_NAME");
 		if (serverName == null || serverName.isBlank()) {
 			try {
 				serverName = InetAddress.getLocalHost().getHostName();

@@ -23,8 +23,8 @@ The plugin is configured via environment variables set in the Kubernetes pod spe
 
 | Variable | Description |
 |---|---|
-| `INGEST_URL` | Full URL of the Python server's `POST /ingest` endpoint |
-| `SERVER_NAME` | Server identity included in every event; falls back to hostname |
+| `EXCEPTLOG_INGEST_URL` | Full URL of the Python server's `POST /ingest` endpoint |
+| `EXCEPTLOG_SERVER_NAME` | Server identity included in every event; falls back to hostname |
 
 ### Python Server (`server/`)
 
