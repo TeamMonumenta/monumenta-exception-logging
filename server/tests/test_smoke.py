@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Byron Marohn
 """
 Smoke tests: end-to-end ingest + query against an in-memory SQLite DB.
 These cover the full pipeline and serve as a quick sanity check.

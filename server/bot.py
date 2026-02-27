@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Byron Marohn
 """Discord bot for the Monumenta exception tracker.
 
 Posts a channel message for each new exception group, edits it as the group
