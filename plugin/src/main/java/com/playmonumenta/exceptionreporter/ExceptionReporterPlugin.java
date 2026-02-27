@@ -61,7 +61,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 			Field commandMapField = Bukkit.getServer().getClass().getDeclaredField("commandMap");
 			commandMapField.setAccessible(true);
 			CommandMap commandMap = (CommandMap) commandMapField.get(Bukkit.getServer());
-			commandMap.register("excepttest", new TestExceptionCommand(serverName, mSender, getLogger()));
+			commandMap.register("excepttest", new TestExceptionCommand());
 			commandMap.register("exceptverbose", new ExceptionVerboseCommand());
 		} catch (NoSuchFieldException | IllegalAccessException e) {
 			getLogger().warning("Failed to register commands: " + e.getMessage());

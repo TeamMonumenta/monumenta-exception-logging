@@ -2,6 +2,7 @@ package com.playmonumenta.exceptionreporter;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -86,17 +87,34 @@ public class ExceptionAppender extends AbstractAppender {
 	}
 
 	private static EventPayload.ExceptionData buildExceptionData(Throwable t, int depthRemaining) {
+		// /excepttest throws a SyntheticTestException so it flows through the real pipeline.
+		// Patch the exception class name and top frame here so every invocation produces a
+		// unique fingerprint and looks like a distinct exception to the ingest service.
+		boolean isSynthetic = t instanceof SyntheticTestException;
+		int syntheticId = isSynthetic ? ThreadLocalRandom.current().nextInt(100_000, 1_000_000) : -1;
+
 		StackTraceElement[] elements = t.getStackTrace();
 		List<EventPayload.FrameData> frames = new ArrayList<>(elements.length);
-		for (StackTraceElement ste : elements) {
+		for (int i = 0; i < elements.length; i++) {
+			StackTraceElement ste = elements[i];
+			String frameClass = (isSynthetic && i == 0)
+				? "com.playmonumenta.test.TestExceptionThrower" + syntheticId
+				: ste.getClassName();
+			int frameLine = (isSynthetic && i == 0)
+				? ThreadLocalRandom.current().nextInt(50, 10_000)
+				: ste.getLineNumber();
 			frames.add(new EventPayload.FrameData(
-				ste.getClassName(),
+				frameClass,
 				ste.getMethodName(),
 				ste.getFileName(),
-				ste.getLineNumber(),
+				frameLine,
 				extractLocation(ste)
 			));
 		}
+
+		String exceptionClassName = isSynthetic
+			? "com.playmonumenta.test.SyntheticException" + syntheticId
+			: t.getClass().getName();
 
 		@Nullable EventPayload.ExceptionData cause = null;
 		if (t.getCause() != null && depthRemaining > 1) {
@@ -104,7 +122,7 @@ public class ExceptionAppender extends AbstractAppender {
 		}
 
 		return new EventPayload.ExceptionData(
-			t.getClass().getName(),
+			exceptionClassName,
 			t.getMessage(),
 			frames,
 			cause
