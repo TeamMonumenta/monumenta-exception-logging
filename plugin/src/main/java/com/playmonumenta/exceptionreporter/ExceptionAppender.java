@@ -3,6 +3,8 @@ package com.playmonumenta.exceptionreporter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.Appender;
 import org.apache.logging.log4j.core.Core;
 import org.apache.logging.log4j.core.LogEvent;
@@ -13,6 +15,7 @@ import org.jetbrains.annotations.Nullable;
 
 @Plugin(name = "MonumentaExceptionReporter", category = Core.CATEGORY_NAME, elementType = Appender.ELEMENT_TYPE)
 public class ExceptionAppender extends AbstractAppender {
+	private static final Logger LOGGER = LogManager.getLogger(ExceptionAppender.class);
 	private static final int MAX_EVENTS_PER_SECOND = 20;
 	private static final int MAX_CAUSE_DEPTH = 5;
 
@@ -63,6 +66,9 @@ public class ExceptionAppender extends AbstractAppender {
 		}
 		if (mEventsThisSecond.getAndIncrement() >= MAX_EVENTS_PER_SECOND) {
 			return;
+		}
+		if (ExceptionReporterPlugin.verbose) {
+			LOGGER.info("[verbose] queuing exception: {} : {}", thrown.getClass().getName(), thrown.getMessage());
 		}
 		mSender.send(buildPayload(event, thrown));
 	}

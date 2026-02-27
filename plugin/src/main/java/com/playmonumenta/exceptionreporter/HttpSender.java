@@ -41,6 +41,8 @@ class HttpSender {
 					HttpResponse<Void> response = mHttpClient.send(request, HttpResponse.BodyHandlers.discarding());
 					if (response.statusCode() != 204) {
 						mLogger.warning("Ingest returned HTTP " + response.statusCode());
+					} else if (ExceptionReporterPlugin.verbose) {
+						mLogger.info("[verbose] exception event POST'd — HTTP 204");
 					}
 				} catch (InterruptedException e) {
 					Thread.currentThread().interrupt();

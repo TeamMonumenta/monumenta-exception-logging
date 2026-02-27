@@ -25,6 +25,14 @@ The plugin is configured via environment variables set in the Kubernetes pod spe
 |---|---|
 | `EXCEPTLOG_INGEST_URL` | Full URL of the Python server's `POST /ingest` endpoint |
 | `EXCEPTLOG_SERVER_NAME` | Server identity included in every event; falls back to hostname |
+| `EXCEPTLOG_VERBOSE` | Set to any non-empty value other than `false` to enable verbose logging (logs every exception queued and each successful POST) |
+
+### In-game commands
+
+| Command | Permission | Description |
+|---|---|---|
+| `/excepttest` | `monumenta.excepttest` | Sends a synthetic exception to the ingest service with a pseudorandom class/method/line so every invocation creates a new exception group. Useful for verifying the full pipeline end-to-end. |
+| `/exceptverbose` | `monumenta.exceptverbose` | Toggles verbose logging at runtime. Equivalent to setting `EXCEPTLOG_VERBOSE` at startup but can be flipped without a restart. Reports the new state to the sender. |
 
 ### Python Server (`server/`)
 

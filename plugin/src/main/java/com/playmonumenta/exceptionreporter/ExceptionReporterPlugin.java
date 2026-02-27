@@ -13,6 +13,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
 public class ExceptionReporterPlugin extends JavaPlugin {
+	public static volatile boolean verbose = false;
+
 	private @Nullable ExceptionAppender mAppender;
 	private @Nullable HttpSender mSender;
 
@@ -20,9 +22,13 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 	public void onEnable() {
 		String ingestUrl = System.getenv("EXCEPTLOG_INGEST_URL");
 		String rawServerName = System.getenv("EXCEPTLOG_SERVER_NAME");
+		String rawVerbose = System.getenv("EXCEPTLOG_VERBOSE");
+
+		verbose = rawVerbose != null && !rawVerbose.isBlank() && !rawVerbose.equalsIgnoreCase("false");
 
 		getLogger().info("  EXCEPTLOG_INGEST_URL=" + (ingestUrl != null ? ingestUrl : "(not set)"));
 		getLogger().info("  EXCEPTLOG_SERVER_NAME=" + (rawServerName != null ? rawServerName : "(not set, will use hostname)"));
+		getLogger().info("  EXCEPTLOG_VERBOSE=" + (rawVerbose != null ? rawVerbose : "(not set)") + " → verbose=" + verbose);
 
 		if (ingestUrl == null || ingestUrl.isBlank()) {
 			getLogger().severe("EXCEPTLOG_INGEST_URL env var not set — exception reporting disabled.");
@@ -59,8 +65,9 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 			commandMapField.setAccessible(true);
 			CommandMap commandMap = (CommandMap) commandMapField.get(Bukkit.getServer());
 			commandMap.register("excepttest", new TestExceptionCommand(serverName, mSender));
+			commandMap.register("exceptverbose", new ExceptionVerboseCommand());
 		} catch (NoSuchFieldException | IllegalAccessException e) {
-			getLogger().warning("Failed to register /excepttest command: " + e.getMessage());
+			getLogger().warning("Failed to register commands: " + e.getMessage());
 		}
 
 		getLogger().info("  Started — server=" + serverName + " url=" + ingestUrl);
