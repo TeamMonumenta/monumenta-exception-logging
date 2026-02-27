@@ -105,6 +105,11 @@ class Tracker:
         self._config = config
         self._conn = db.init_db(config)
 
+    def close(self) -> None:
+        """Checkpoint WAL and close the database connection cleanly."""
+        self._conn.execute("PRAGMA wal_checkpoint(FULL)")
+        self._conn.close()
+
     # --- Ingest ---
 
     def ingest_event(self, event: IngestEvent) -> tuple[str, bool]:

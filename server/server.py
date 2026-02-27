@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import os
-from typing import TYPE_CHECKING, Optional
+import signal
+from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import ValidationError
 from quart import Quart, jsonify, request
@@ -83,6 +84,34 @@ def _mask_token(token: str) -> str:
     return token[0] + '*' * (len(token) - 2) + token[-1]
 
 
+async def _run_until_stopped(
+    app: Quart,
+    port: int,
+    bot: Optional["ExceptionBot"],
+    discord_token: Optional[str],
+    stop: asyncio.Event,
+) -> None:
+    """Run Quart and the optional Discord bot until a stop signal is received."""
+    tasks: list[asyncio.Task[Any]] = [
+        asyncio.create_task(app.run_task(host='0.0.0.0', port=port), name='quart'),
+    ]
+    if bot is not None and discord_token:
+        tasks.append(asyncio.create_task(bot.start(discord_token), name='discord'))
+
+    # asyncio.wait requires Task/Future objects, so wrap the stop event in a task.
+    stop_task: asyncio.Task[Any] = asyncio.create_task(stop.wait(), name='stop')
+    done, _ = await asyncio.wait([stop_task, *tasks], return_when=asyncio.FIRST_COMPLETED)
+    stop_task.cancel()
+
+    if stop_task in done:
+        logger.info('Shutdown signal received, stopping...')
+        for task in tasks:
+            task.cancel()
+        if bot is not None:
+            await bot.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def main():
     config = from_env()
     port = int(os.environ.get('PORT', '8080'))
@@ -109,17 +138,24 @@ async def main():
     )
 
     tracker = Tracker(config)
+
+    # Register signal handlers so both Ctrl+C and Kubernetes SIGTERM trigger a clean shutdown.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+
+    bot: Optional["ExceptionBot"] = None
     if discord_token:
         from bot import ExceptionBot  # pylint: disable=import-outside-toplevel
         bot = ExceptionBot(tracker, channel_id, refresh_period)
-        app = create_app(tracker, bot, verbose=config.verbose)
-        await asyncio.gather(
-            app.run_task(host='0.0.0.0', port=port),
-            bot.start(discord_token),
-        )
-    else:
-        app = create_app(tracker, verbose=config.verbose)
-        await asyncio.gather(app.run_task(host='0.0.0.0', port=port))
+    app = create_app(tracker, bot, verbose=config.verbose)
+
+    try:
+        await _run_until_stopped(app, port, bot, discord_token, stop)
+    finally:
+        tracker.close()
+        logger.info('Shutdown complete.')
 
 
 if __name__ == '__main__':
