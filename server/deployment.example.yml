@@ -52,6 +52,10 @@ spec:
           value: com.playmonumenta
         - name: PORT
           value: "8080"
+        # Log a formatted entry to stdout for every ingest submission.
+        # Set to "false" to reduce log verbosity in production.
+        - name: VERBOSE
+          value: "true"
         # Discord channel ID (integer) where exception alerts are posted.
         - name: DISCORD_CHANNEL
           value: "YOUR_CHANNEL_ID_HERE"

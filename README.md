@@ -50,6 +50,7 @@ The server is configured via environment variables:
 | `DB_PATH` | Path to SQLite database (default: `tracker.db`) |
 | `APP_PACKAGES` | Comma-separated package prefixes for fingerprinting (default: `com.playmonumenta`) |
 | `PORT` | HTTP port (default: `8080`) |
+| `VERBOSE` | Log a formatted entry for every ingest submission (default: `true`; set to `false` to disable) |
 | `DISCORD_TOKEN` | Discord bot token; if unset, the bot is disabled |
 | `DISCORD_CHANNEL` | Discord channel ID (integer) |
 | `DISCORD_REFRESH_PERIOD_SECONDS` | Refresh loop interval in seconds (default: `300`) |
