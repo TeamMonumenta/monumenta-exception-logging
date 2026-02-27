@@ -2,6 +2,7 @@ package com.playmonumenta.exceptionreporter;
 
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.logging.Logger;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 
@@ -14,8 +15,9 @@ class TestExceptionCommand extends Command {
 
 	private final String mServerId;
 	private final HttpSender mSender;
+	private final Logger mLogger;
 
-	TestExceptionCommand(String serverId, HttpSender sender) {
+	TestExceptionCommand(String serverId, HttpSender sender, Logger logger) {
 		super("excepttest",
 			"Send a synthetic test exception to the ingest service",
 			"/excepttest",
@@ -23,6 +25,7 @@ class TestExceptionCommand extends Command {
 		setPermission("monumenta.excepttest");
 		mServerId = serverId;
 		mSender = sender;
+		mLogger = logger;
 	}
 
 	@Override
@@ -65,6 +68,10 @@ class TestExceptionCommand extends Command {
 			exceptionData
 		);
 
+		if (ExceptionReporterPlugin.verbose) {
+			mLogger.info("[verbose] /excepttest dispatching synthetic exception: "
+				+ exceptionClass + "." + method + ":" + line);
+		}
 		mSender.send(payload);
 		sender.sendMessage("Test exception sent to ingest (class=" + exceptionClass + ", method=" + method + ", line=" + line + ")");
 		return true;

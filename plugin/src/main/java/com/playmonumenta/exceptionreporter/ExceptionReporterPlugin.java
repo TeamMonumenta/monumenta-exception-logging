@@ -3,10 +3,7 @@ package com.playmonumenta.exceptionreporter;
 import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.core.LoggerContext;
-import org.apache.logging.log4j.core.config.Configuration;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandMap;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -54,17 +51,17 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 		mAppender = new ExceptionAppender(serverName, mSender);
 		mAppender.start();
 
-		LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
-		Configuration cfg = ctx.getConfiguration();
-		cfg.addAppender(mAppender);
-		cfg.getRootLogger().addAppender(mAppender, Level.ERROR, null);
-		ctx.updateLoggers();
+		// Attach directly to the core root Logger so the appender receives events from
+		// Paper's own logging context regardless of which classloader is calling.
+		// LogManager.getContext(false) can return a child context when called from a
+		// plugin classloader, causing the appender to miss server-level ERROR events.
+		((org.apache.logging.log4j.core.Logger) LogManager.getRootLogger()).addAppender(mAppender);
 
 		try {
 			Field commandMapField = Bukkit.getServer().getClass().getDeclaredField("commandMap");
 			commandMapField.setAccessible(true);
 			CommandMap commandMap = (CommandMap) commandMapField.get(Bukkit.getServer());
-			commandMap.register("excepttest", new TestExceptionCommand(serverName, mSender));
+			commandMap.register("excepttest", new TestExceptionCommand(serverName, mSender, getLogger()));
 			commandMap.register("exceptverbose", new ExceptionVerboseCommand());
 		} catch (NoSuchFieldException | IllegalAccessException e) {
 			getLogger().warning("Failed to register commands: " + e.getMessage());
@@ -76,10 +73,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 	@Override
 	public void onDisable() {
 		if (mAppender != null) {
-			LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
-			Configuration cfg = ctx.getConfiguration();
-			cfg.getRootLogger().removeAppender("MonumentaExceptionReporter");
-			ctx.updateLoggers();
+			((org.apache.logging.log4j.core.Logger) LogManager.getRootLogger()).removeAppender(mAppender);
 			mAppender.stop();
 			mAppender = null;
 		}
