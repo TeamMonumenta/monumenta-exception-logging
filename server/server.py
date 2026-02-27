@@ -118,6 +118,7 @@ async def main():
     discord_token = os.environ.get('DISCORD_TOKEN')
     channel_id = int(os.environ.get('DISCORD_CHANNEL', '0'))
     refresh_period = int(os.environ.get('DISCORD_REFRESH_PERIOD_SECONDS', '300'))
+    slash_command_prefix = os.environ.get('SLASH_COMMAND_PREFIX', '')
 
     logger.info(
         "Starting with config:\n"
@@ -128,7 +129,8 @@ async def main():
         "  VERBOSE=%s\n"
         "  DISCORD_TOKEN=%s\n"
         "  DISCORD_CHANNEL=%s\n"
-        "  DISCORD_REFRESH_PERIOD_SECONDS=%s",
+        "  DISCORD_REFRESH_PERIOD_SECONDS=%s\n"
+        "  SLASH_COMMAND_PREFIX=%s",
         config.db_path,
         ','.join(config.app_packages),
         config.expiry_days,
@@ -137,6 +139,7 @@ async def main():
         _mask_token(discord_token) if discord_token else '(not set)',
         channel_id if discord_token else '(not set)',
         refresh_period if discord_token else '(not set)',
+        repr(slash_command_prefix) if discord_token else '(not set)',
     )
 
     tracker = Tracker(config)
@@ -150,7 +153,7 @@ async def main():
     bot: Optional["ExceptionBot"] = None
     if discord_token:
         from bot import ExceptionBot  # pylint: disable=import-outside-toplevel
-        bot = ExceptionBot(tracker, channel_id, refresh_period)
+        bot = ExceptionBot(tracker, channel_id, refresh_period, slash_command_prefix)
     app = create_app(tracker, bot, verbose=config.verbose)
 
     try:

@@ -65,6 +65,7 @@ The server is configured via environment variables:
 | `DISCORD_TOKEN` | Discord bot token; if unset, the bot is disabled |
 | `DISCORD_CHANNEL` | Discord channel ID (integer) |
 | `DISCORD_REFRESH_PERIOD_SECONDS` | Refresh loop interval in seconds (default: `300`) |
+| `SLASH_COMMAND_PREFIX` | Prefix prepended to all slash command names (default: empty). Use to run multiple bots in one Discord — e.g. `ex_play_` makes `/new` become `/ex_play_new`. |
 
 ## Architecture
 
@@ -99,6 +100,8 @@ fingerprint. Muted groups are displayed as spoilers (`||..||`); resolved groups 
 (`~~..~~`).
 
 **Slash commands (all ephemeral):**
+
+Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names are as shown).
 
 | Command | Args | Description |
 |---|---|---|

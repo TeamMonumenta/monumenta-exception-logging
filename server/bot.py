@@ -158,12 +158,14 @@ async def _send_chunks(interaction: discord.Interaction, lines: list[str]) -> No
 class ExceptionBot(commands.Bot):
     """Discord bot that tracks Monumenta exception groups."""
 
-    def __init__(self, tracker: Tracker, channel_id: int, refresh_period: int):
+    def __init__(self, tracker: Tracker, channel_id: int, refresh_period: int,
+                 slash_command_prefix: str = ""):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.tracker = tracker
         self.channel_id = channel_id
         self.refresh_period = refresh_period
+        self.slash_command_prefix = slash_command_prefix
         self._refresh_running = False
 
     async def setup_hook(self) -> None:
@@ -260,8 +262,9 @@ class ExceptionBot(commands.Bot):
     # --- Slash command registration ---
 
     def _register_commands(self) -> None:  # pylint: disable=too-many-statements
+        p = self.slash_command_prefix
 
-        @self.tree.command(name="top", description="Top 20 active exception groups by recent count")
+        @self.tree.command(name=f"{p}top", description="Top 20 active exception groups by recent count")
         @app_commands.describe(window_hours="Hours window to count recent occurrences (default 24)")
         async def cmd_top(interaction: discord.Interaction, window_hours: int = 24) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -274,7 +277,7 @@ class ExceptionBot(commands.Bot):
             ]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="new", description="Exception groups first seen in the last N hours")
+        @self.tree.command(name=f"{p}new", description="Exception groups first seen in the last N hours")
         @app_commands.describe(hours="Look-back window in hours (default 24)")
         async def cmd_new(interaction: discord.Interaction, hours: int = 24) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -287,7 +290,7 @@ class ExceptionBot(commands.Bot):
             lines = [f"**New groups (last {hours}h)**"] + [_fmt_summary_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="search", description="Search exception groups by class or message")
+        @self.tree.command(name=f"{p}search", description="Search exception groups by class or message")
         @app_commands.describe(query="Substring to search for in exception class or message")
         async def cmd_search(interaction: discord.Interaction, query: str) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -300,7 +303,7 @@ class ExceptionBot(commands.Bot):
             lines = [f"**Search: `{query}`**"] + [_fmt_summary_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="server", description="Top exception groups for a specific server")
+        @self.tree.command(name=f"{p}server", description="Top exception groups for a specific server")
         @app_commands.describe(name="Server ID (e.g. survival-0)")
         async def cmd_server(interaction: discord.Interaction, name: str) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -313,7 +316,7 @@ class ExceptionBot(commands.Bot):
             lines = [f"**Groups for `{name}`**"] + [_fmt_summary_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="muted", description="List muted exception groups")
+        @self.tree.command(name=f"{p}muted", description="List muted exception groups")
         async def cmd_muted(interaction: discord.Interaction) -> None:
             await interaction.response.defer(ephemeral=True)
             groups = self.tracker.get_muted_groups()
@@ -323,7 +326,7 @@ class ExceptionBot(commands.Bot):
             lines = ["**Muted groups**"] + [_fmt_summary_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="resolved", description="List resolved exception groups")
+        @self.tree.command(name=f"{p}resolved", description="List resolved exception groups")
         async def cmd_resolved(interaction: discord.Interaction) -> None:
             await interaction.response.defer(ephemeral=True)
             groups = self.tracker.get_resolved_groups()
@@ -333,7 +336,7 @@ class ExceptionBot(commands.Bot):
             lines = ["**Resolved groups**"] + [_fmt_summary_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="details", description="Full details for an exception group")
+        @self.tree.command(name=f"{p}details", description="Full details for an exception group")
         @app_commands.describe(short_id="8-character short ID shown in group listings")
         async def cmd_details(interaction: discord.Interaction, short_id: str) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -370,7 +373,7 @@ class ExceptionBot(commands.Bot):
 
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name="mute", description="Mute an exception group")
+        @self.tree.command(name=f"{p}mute", description="Mute an exception group")
         @app_commands.describe(short_id="8-character short ID of the group to mute")
         async def cmd_mute(interaction: discord.Interaction, short_id: str) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -392,7 +395,7 @@ class ExceptionBot(commands.Bot):
                     break
             await interaction.followup.send(f"Muted `{short_id}`.", ephemeral=True)
 
-        @self.tree.command(name="unmute", description="Unmute an exception group")
+        @self.tree.command(name=f"{p}unmute", description="Unmute an exception group")
         @app_commands.describe(short_id="8-character short ID of the group to unmute")
         async def cmd_unmute(interaction: discord.Interaction, short_id: str) -> None:
             await interaction.response.defer(ephemeral=True)
@@ -413,7 +416,7 @@ class ExceptionBot(commands.Bot):
                     break
             await interaction.followup.send(f"Unmuted `{short_id}`.", ephemeral=True)
 
-        @self.tree.command(name="resolve", description="Mark an exception group as resolved")
+        @self.tree.command(name=f"{p}resolve", description="Mark an exception group as resolved")
         @app_commands.describe(short_id="8-character short ID of the group to resolve")
         async def cmd_resolve(interaction: discord.Interaction, short_id: str) -> None:
             await interaction.response.defer(ephemeral=True)

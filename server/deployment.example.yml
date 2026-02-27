@@ -67,6 +67,12 @@ spec:
         # How often (seconds) the bot re-edits all tracked channel messages.
         - name: DISCORD_REFRESH_PERIOD_SECONDS
           value: "300"
+        # Prefix prepended to all slash command names. Use when running multiple
+        # bots in one Discord server to avoid command name collisions.
+        # Example: "ex_play_" makes /new become /ex_play_new.
+        # Omit or leave empty to use unprefixed command names.
+        #- name: SLASH_COMMAND_PREFIX
+        #  value: ""
         # Bot token loaded from a Kubernetes secret.
         # Create the secret with:
         #   kubectl create secret generic exception-logger --from-literal=discord-token='YOUR_TOKEN_HERE'
