@@ -1,11 +1,14 @@
 package com.playmonumenta.exceptionreporter;
 
+import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.config.Configuration;
+import org.bukkit.Bukkit;
+import org.bukkit.command.CommandMap;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
@@ -16,6 +19,11 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 	@Override
 	public void onEnable() {
 		String ingestUrl = System.getenv("EXCEPTLOG_INGEST_URL");
+		String rawServerName = System.getenv("EXCEPTLOG_SERVER_NAME");
+
+		getLogger().info("  EXCEPTLOG_INGEST_URL=" + (ingestUrl != null ? ingestUrl : "(not set)"));
+		getLogger().info("  EXCEPTLOG_SERVER_NAME=" + (rawServerName != null ? rawServerName : "(not set, will use hostname)"));
+
 		if (ingestUrl == null || ingestUrl.isBlank()) {
 			getLogger().severe("EXCEPTLOG_INGEST_URL env var not set — exception reporting disabled.");
 			return;
@@ -27,7 +35,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 			return;
 		}
 
-		String serverName = System.getenv("EXCEPTLOG_SERVER_NAME");
+		String serverName = rawServerName;
 		if (serverName == null || serverName.isBlank()) {
 			try {
 				serverName = InetAddress.getLocalHost().getHostName();
@@ -46,7 +54,16 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 		cfg.getRootLogger().addAppender(mAppender, Level.ERROR, null);
 		ctx.updateLoggers();
 
-		getLogger().info("Started — server=" + serverName + " url=" + ingestUrl);
+		try {
+			Field commandMapField = Bukkit.getServer().getClass().getDeclaredField("commandMap");
+			commandMapField.setAccessible(true);
+			CommandMap commandMap = (CommandMap) commandMapField.get(Bukkit.getServer());
+			commandMap.register("excepttest", new TestExceptionCommand(serverName, mSender));
+		} catch (NoSuchFieldException | IllegalAccessException e) {
+			getLogger().warning("Failed to register /excepttest command: " + e.getMessage());
+		}
+
+		getLogger().info("  Started — server=" + serverName + " url=" + ingestUrl);
 	}
 
 	@Override
