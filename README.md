@@ -1,8 +1,10 @@
 # Monumenta Exception Logger
 
-Custom exception tracker for the Monumenta Minecraft network (50+ Paper servers on Kubernetes).
-Aggregates and fingerprints exceptions from all servers into a central SQLite database, with Discord
-integration for alerts and triage.
+Custom exception tracker used by the the Monumenta Minecraft network.
+Aggregates and fingerprints exceptions from all servers into a central SQLite
+database, with Discord integration for alerts and triage.
+
+Minimal requirements make this relatively simple to deploy in any setup.
 
 ## Components
 
@@ -19,7 +21,7 @@ The appender is attached programmatically at plugin startup via `LoggerContext` 
 disable. It uses Java's built-in `java.net.http.HttpClient` — no external HTTP library is needed.
 Gson (available on Paper's classpath) handles JSON serialization.
 
-The plugin is configured via environment variables set in the Kubernetes pod spec:
+The plugin is configured via environment variables for simplicity in a docker/kubernetes environment:
 
 | Variable | Description |
 |---|---|
@@ -118,8 +120,7 @@ writes complete fast enough not to block the event loop meaningfully.
 
 ### Security
 
-No authentication. Plain HTTP only. Security is provided by the Kubernetes cluster network — the
-ingest service is not exposed outside the cluster.
+No authentication. Plain HTTP only. You must ensure that the server is properly firewalled. 
 
 ## Development
 
