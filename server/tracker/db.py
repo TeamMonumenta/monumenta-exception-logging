@@ -12,6 +12,7 @@ def init_db(config: TrackerConfig) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
     _create_tables(conn)
+    _migrate(conn)
     return conn
 
 
@@ -31,6 +32,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             status             TEXT NOT NULL DEFAULT 'active'
                                CHECK (status IN ('active', 'muted', 'resolved')),
             discord_message_id TEXT,
+            has_activity       INTEGER NOT NULL DEFAULT 0,
             muted_by           TEXT,
             muted_at           INTEGER,
             resolved_by        TEXT,
@@ -71,6 +73,17 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply incremental schema changes to existing databases."""
+    try:
+        conn.execute(
+            "ALTER TABLE error_groups ADD COLUMN has_activity INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists (fresh DB or previously migrated)
+
+
 def set_discord_message_id(
     conn: sqlite3.Connection, fingerprint: str, message_id: Optional[str]
 ) -> None:
@@ -87,6 +100,24 @@ def get_all_discord_messages(conn: sqlite3.Connection) -> list[tuple[str, str]]:
         "WHERE discord_message_id IS NOT NULL"
     ).fetchall()
     return [(row['fingerprint'], row['discord_message_id']) for row in rows]
+
+
+def get_active_discord_messages(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    """Return (fingerprint, message_id) pairs where has_activity=1 (need re-edit)."""
+    rows = conn.execute(
+        "SELECT fingerprint, discord_message_id FROM error_groups "
+        "WHERE discord_message_id IS NOT NULL AND has_activity = 1"
+    ).fetchall()
+    return [(row['fingerprint'], row['discord_message_id']) for row in rows]
+
+
+def clear_has_activity(conn: sqlite3.Connection, fingerprint: str) -> None:
+    """Reset has_activity to 0 after a Discord message has been successfully edited."""
+    with conn:
+        conn.execute(
+            "UPDATE error_groups SET has_activity = 0 WHERE fingerprint = ?",
+            (fingerprint,)
+        )
 
 
 def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any]:

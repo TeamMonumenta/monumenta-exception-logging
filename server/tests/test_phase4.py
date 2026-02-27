@@ -324,3 +324,69 @@ def test_build_frames_block_truncates():
 
 def test_build_frames_block_empty():
     assert _build_frames_block([], 1000) == ""
+
+
+# ===========================================================================
+# has_activity flag
+# ===========================================================================
+
+def _get_has_activity(api: Tracker, fingerprint: str) -> int:
+    row = api._conn.execute(  # pylint: disable=protected-access
+        "SELECT has_activity FROM error_groups WHERE fingerprint = ?", (fingerprint,)
+    ).fetchone()
+    assert row is not None
+    return row['has_activity']
+
+
+def test_new_group_has_activity_false(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    assert _get_has_activity(fresh_api, fp) == 0
+
+
+def test_repeat_ingest_sets_has_activity(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    assert _get_has_activity(fresh_api, fp) == 1
+
+
+def test_get_active_discord_messages_requires_activity_flag(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fresh_api.set_discord_message_id(fp, "msg-1")
+    # No repeat ingest yet — has_activity is still 0
+    assert fresh_api.get_active_discord_messages() == []
+
+
+def test_get_active_discord_messages_returns_after_repeat_ingest(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fresh_api.set_discord_message_id(fp, "msg-1")
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))  # sets has_activity=1
+    pairs = fresh_api.get_active_discord_messages()
+    assert (fp, "msg-1") in pairs
+
+
+def test_get_active_discord_messages_requires_message_id(fresh_api):
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    # has_activity=1 but no discord_message_id
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    assert fresh_api.get_active_discord_messages() == []
+
+
+def test_clear_has_activity_resets_flag(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    assert _get_has_activity(fresh_api, fp) == 1
+    fresh_api.clear_has_activity(fp)
+    assert _get_has_activity(fresh_api, fp) == 0
+
+
+def test_active_messages_filtered_by_flag(fresh_api):
+    fp1, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fp2, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))
+    fresh_api.set_discord_message_id(fp1, "aaa")
+    fresh_api.set_discord_message_id(fp2, "bbb")
+    # Only fp2 gets a repeat ingest
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))
+    pairs = fresh_api.get_active_discord_messages()
+    fps = [p[0] for p in pairs]
+    assert fp2 in fps
+    assert fp1 not in fps

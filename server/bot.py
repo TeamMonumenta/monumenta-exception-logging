@@ -162,6 +162,7 @@ class ExceptionBot(commands.Bot):
         self.tracker = tracker
         self.channel_id = channel_id
         self.refresh_period = refresh_period
+        self._refresh_running = False
 
     async def setup_hook(self) -> None:
         self._register_commands()
@@ -233,9 +234,21 @@ class ExceptionBot(commands.Bot):
         await self.wait_until_ready()
         while True:
             await asyncio.sleep(self.refresh_period)
-            pairs = self.tracker.get_all_discord_messages()
-            for fingerprint, message_id in pairs:
-                await self.edit_exception_message(fingerprint, message_id)
+            if self._refresh_running:
+                logger.warning("Refresh loop skipping tick: previous run still in progress")
+                continue
+            self._refresh_running = True
+            try:
+                pairs = self.tracker.get_active_discord_messages()
+                first = True
+                for fingerprint, message_id in pairs:
+                    if not first:
+                        await asyncio.sleep(2)
+                    first = False
+                    await self.edit_exception_message(fingerprint, message_id)
+                    self.tracker.clear_has_activity(fingerprint)
+            finally:
+                self._refresh_running = False
 
     # --- Slash command helpers ---
 

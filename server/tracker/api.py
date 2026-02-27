@@ -360,6 +360,14 @@ class Tracker:
         """Return [(fingerprint, discord_message_id), ...] for all tracked groups."""
         return db.get_all_discord_messages(self._conn)
 
+    def get_active_discord_messages(self) -> list[tuple[str, str]]:
+        """Return [(fingerprint, discord_message_id), ...] only for groups with has_activity=1."""
+        return db.get_active_discord_messages(self._conn)
+
+    def clear_has_activity(self, fingerprint: str) -> None:
+        """Reset has_activity to 0 after the Discord message for a group has been edited."""
+        db.clear_has_activity(self._conn, fingerprint)
+
     def get_fingerprint_by_short_id(self, short_id: str) -> Optional[str]:
         """Look up a full fingerprint from an 8-character prefix (short ID)."""
         row = self._conn.execute(

@@ -86,7 +86,7 @@ def ingest_event(
             group_id = row['id']
             conn.execute(
                 """UPDATE error_groups
-                   SET last_seen = ?, total_count = total_count + 1
+                   SET last_seen = ?, total_count = total_count + 1, has_activity = 1
                    WHERE id = ?""",
                 (timestamp_s, group_id)
             )
