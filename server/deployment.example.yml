@@ -51,6 +51,10 @@ spec:
         # Frames outside these packages are treated as library frames.
         - name: APP_PACKAGES
           value: com.playmonumenta
+        # Number of days to retain exception groups and occurrences before purging.
+        # Omit to use the default of 14 days.
+        #- name: EXPIRY_DAYS
+        #  value: "14"
         - name: PORT
           value: "8080"
         # Log a formatted entry to stdout for every ingest submission.

@@ -48,7 +48,7 @@ CREATE INDEX idx_groups_first_seen        ON error_groups(first_seen);
 
 ### `occurrences`
 
-Individual exception events. Retained for a rolling 14-day window only. For high-volume groups, this table drives per-server counts and timeline data.
+Individual exception events. Retained for a rolling window (default: 14 days, configurable via `EXPIRY_DAYS`). For high-volume groups, this table drives per-server counts and timeline data.
 
 ```sql
 CREATE TABLE occurrences (
@@ -68,7 +68,7 @@ CREATE INDEX idx_occurrences_timestamp       ON occurrences(timestamp);  -- for 
 - Timeline aggregation at any granularity
 - Identifying affected servers for a group
 
-At a few thousand events/hour across all servers, 14 days of occurrences is at most ~1M rows — well within SQLite's comfortable range.
+At a few thousand events/hour across all servers, the default 14-day retention window yields at most ~1M rows — well within SQLite's comfortable range.
 
 ---
 
@@ -130,16 +130,17 @@ If no application frames are found (e.g. the exception originates entirely in fr
 
 ## Auto-Expiry
 
-A background task runs every hour and purges stale data in this order:
+A background task runs every hour and purges stale data in this order. The retention window is
+controlled by the `EXPIRY_DAYS` environment variable (default: 14 days; `1209600` = 14 × 86400 s):
 
 ```sql
--- 1. Delete old occurrences (older than 14 days)
+-- 1. Delete old occurrences (older than EXPIRY_DAYS)
 DELETE FROM occurrences WHERE timestamp < strftime('%s', 'now') - 1209600;
 
--- 2. Delete old aggregated counts (older than 14 days)
+-- 2. Delete old aggregated counts (older than EXPIRY_DAYS)
 DELETE FROM server_hour_counts WHERE hour_bucket < strftime('%s', 'now') - 1209600;
 
--- 3. Delete groups not seen in the last 14 days (cascades to any remaining child rows)
+-- 3. Delete groups not seen within EXPIRY_DAYS (cascades to any remaining child rows)
 DELETE FROM error_groups WHERE last_seen < strftime('%s', 'now') - 1209600;
 ```
 

@@ -18,4 +18,10 @@ def from_env() -> TrackerConfig:
     raw_packages = os.environ.get("APP_PACKAGES", "com.playmonumenta")
     app_packages = [p.strip() for p in raw_packages.split(",") if p.strip()]
     verbose = os.environ.get("VERBOSE", "true").lower() not in ("false", "0", "no")
-    return TrackerConfig(db_path=db_path, app_packages=app_packages, verbose=verbose)
+    expiry_days = int(os.environ.get("EXPIRY_DAYS", "14"))
+    return TrackerConfig(
+        db_path=db_path,
+        app_packages=app_packages,
+        verbose=verbose,
+        expiry_days=expiry_days,
+    )

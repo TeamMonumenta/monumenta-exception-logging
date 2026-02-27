@@ -123,6 +123,7 @@ async def main():
         "Starting with config:\n"
         "  DB_PATH=%s\n"
         "  APP_PACKAGES=%s\n"
+        "  EXPIRY_DAYS=%s\n"
         "  PORT=%s\n"
         "  VERBOSE=%s\n"
         "  DISCORD_TOKEN=%s\n"
@@ -130,6 +131,7 @@ async def main():
         "  DISCORD_REFRESH_PERIOD_SECONDS=%s",
         config.db_path,
         ','.join(config.app_packages),
+        config.expiry_days,
         port,
         config.verbose,
         _mask_token(discord_token) if discord_token else '(not set)',

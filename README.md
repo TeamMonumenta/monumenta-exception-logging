@@ -59,6 +59,7 @@ The server is configured via environment variables:
 |---|---|
 | `DB_PATH` | Path to SQLite database (default: `tracker.db`) |
 | `APP_PACKAGES` | Comma-separated package prefixes for fingerprinting (default: `com.playmonumenta`) |
+| `EXPIRY_DAYS` | Number of days to retain exception groups and occurrences before purging (default: `14`) |
 | `PORT` | HTTP port (default: `8080`) |
 | `VERBOSE` | Log a formatted entry for every ingest submission (default: `true`; set to `false` to disable) |
 | `DISCORD_TOKEN` | Discord bot token; if unset, the bot is disabled |
@@ -84,14 +85,14 @@ See [SCHEMA.md](SCHEMA.md) for the full fingerprinting algorithm and schema.
 Groups have three statuses: `active`, `muted`, `resolved`. **Status is never changed by ingest** —
 active, muted, and resolved groups all receive count and `last_seen` updates on reoccurrence. Status
 is only changed by explicit slash commands (`/mute`, `/unmute`, `/resolve`). Resolved groups age
-out naturally after the 14-day retention window expires.
+out naturally after the retention window expires (see `EXPIRY_DAYS`).
 
 ### Discord integration
 
 When a new exception group is first observed, the bot posts a message to the configured channel
 with fingerprint, timestamps, affected servers, count, and stack trace (truncated to Discord's 2000-
 char limit). A background refresh loop (default 300s) re-edits all tracked messages with fresh
-data. When the 14-day expiry removes a group, its Discord message is deleted.
+data. When expiry removes a group, its Discord message is deleted.
 
 Groups are identified in slash commands by their **short ID**: the first 8 hex characters of the
 fingerprint. Muted groups are displayed as spoilers (`||..||`); resolved groups as strikethrough
