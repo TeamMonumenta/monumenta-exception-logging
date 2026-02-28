@@ -120,6 +120,17 @@ def _fmt_summary_line(g: GroupSummary) -> str:
     )
 
 
+def _fmt_new_line(g: GroupSummary) -> str:
+    fp8 = g.fingerprint[:8]
+    servers = ",".join(sorted(g.server_counts.keys())) if g.server_counts else "—"
+    last_ts = int(g.last_seen.timestamp())
+    return (
+        f"`{fp8}` [{g.status}] **{g.exception_class}** "
+        f"(recent: {g.recent_count}, total: {g.total_count}) "
+        f"servers: {servers}   last seen: <t:{last_ts}:f>"
+    )
+
+
 def _chunk_lines(lines: list[str], limit: int = _MAX_MSG_LEN) -> list[str]:
     """Split lines into chunks that each fit within *limit* characters."""
     chunks: list[str] = []
@@ -278,16 +289,32 @@ class ExceptionBot(commands.Bot):
             await _send_chunks(interaction, lines)
 
         @self.tree.command(name=f"{p}new", description="Exception groups first seen in the last N hours")
-        @app_commands.describe(hours="Look-back window in hours (default 24)")
-        async def cmd_new(interaction: discord.Interaction, hours: int = 24) -> None:
+        @app_commands.describe(
+            hours="Look-back window in hours (default 24)",
+            before="Only show groups first seen before this Unix timestamp (optional)",
+        )
+        async def cmd_new(
+            interaction: discord.Interaction, hours: int = 24, before: Optional[int] = None
+        ) -> None:
             await interaction.response.defer(ephemeral=True)
-            groups = self.tracker.get_new_groups(hours=hours)
+            groups = self.tracker.get_new_groups(hours=hours, before=before)
             if not groups:
-                await interaction.followup.send(
-                    f"No new groups in the last {hours}h.", ephemeral=True
-                )
+                if before is not None:
+                    await interaction.followup.send(
+                        f"No new groups in the {hours}h window before <t:{before}:f>.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"No new groups in the last {hours}h.", ephemeral=True
+                    )
                 return
-            lines = [f"**New groups (last {hours}h)**"] + [_fmt_summary_line(g) for g in groups]
+            header = (
+                f"**New groups ({hours}h before <t:{before}:f>)**"
+                if before is not None
+                else f"**New groups (last {hours}h)**"
+            )
+            lines = [header] + [_fmt_new_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
         @self.tree.command(name=f"{p}search", description="Search exception groups by class or message")

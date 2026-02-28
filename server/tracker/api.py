@@ -156,21 +156,40 @@ class Tracker:
             result.append(_row_to_summary(row, row['recent_count'], server_counts))
         return result
 
-    def get_new_groups(self, hours: int = 24) -> list[GroupSummary]:
-        """Return groups first seen within the last `hours` hours.
+    def get_new_groups(self, hours: int = 24, before: Optional[int] = None) -> list[GroupSummary]:
+        """Return groups first seen within the `hours`-hour window ending at `before`.
 
+        If `before` is None the window ends at the current time.
         Includes groups of all statuses — a newly detected exception that was
         immediately muted or resolved still appears here.
         """
-        cutoff = int(time.time()) - hours * 3600
-        rows = self._conn.execute(
-            """SELECT id, fingerprint, exception_class, message_template,
-                      status, first_seen, last_seen, total_count
-               FROM error_groups
-               WHERE first_seen >= ?
-               ORDER BY first_seen DESC""",
-            (cutoff,)
-        ).fetchall()
+        end = before if before is not None else int(time.time())
+        cutoff = end - hours * 3600
+        if before is not None:
+            # Use the last occurrence strictly before `before` as last_seen so the
+            # displayed timestamp isn't contaminated by occurrences after the window.
+            rows = self._conn.execute(
+                """SELECT g.id, g.fingerprint, g.exception_class, g.message_template,
+                          g.status, g.first_seen, g.total_count,
+                          COALESCE(
+                              (SELECT MAX(o.timestamp) FROM occurrences o
+                               WHERE o.group_id = g.id AND o.timestamp < ?),
+                              g.first_seen
+                          ) AS last_seen
+                   FROM error_groups g
+                   WHERE g.first_seen >= ? AND g.first_seen < ?
+                   ORDER BY g.first_seen DESC""",
+                (end, cutoff, end)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT id, fingerprint, exception_class, message_template,
+                          status, first_seen, last_seen, total_count
+                   FROM error_groups
+                   WHERE first_seen >= ? AND first_seen < ?
+                   ORDER BY first_seen DESC""",
+                (cutoff, end)
+            ).fetchall()
         result: list[GroupSummary] = []
         for row in rows:
             recent_count_row = self._conn.execute(
