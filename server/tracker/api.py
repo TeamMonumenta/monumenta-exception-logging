@@ -58,6 +58,7 @@ class GroupDetails:
     servers_affected: list[str]           # servers seen within the retention window
     server_counts_24h: dict[str, int]     # fixed 24-hour window
     hourly_timeline: list[tuple[datetime, int]]  # (hour_start, count), fixed 7-day window
+    latest_message: Optional[str] = None  # most recent raw (un-normalized) exception message
     muted_by: Optional[str] = None
     muted_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
@@ -220,6 +221,12 @@ class Tracker:
             (group_id, cutoff_7d)
         ).fetchall()
 
+        latest_msg_row = self._conn.execute(
+            "SELECT message FROM occurrences WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1",
+            (group_id,)
+        ).fetchone()
+        latest_message = latest_msg_row['message'] if latest_msg_row is not None else None
+
         return GroupDetails(
             fingerprint=row['fingerprint'],
             exception_class=row['exception_class'],
@@ -234,6 +241,7 @@ class Tracker:
             servers_affected=[r['server'] for r in server_rows],
             server_counts_24h=self._get_server_counts(group_id, cutoff_24h),
             hourly_timeline=[(_ts_to_dt(r['hour']), r['count']) for r in timeline_rows],
+            latest_message=latest_message,
             muted_by=row['muted_by'],
             muted_at=_ts_to_dt(row['muted_at']) if row['muted_at'] is not None else None,
             resolved_by=row['resolved_by'],

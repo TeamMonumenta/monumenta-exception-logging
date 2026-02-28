@@ -361,6 +361,10 @@ class ExceptionBot(commands.Bot):
                 f"Total count: {details.total_count}",
                 f"Servers: {', '.join(sorted(details.servers_affected)) or 'none'}",
                 f"Logger: `{details.logger}`",
+            ]
+            if details.latest_message:
+                lines.append(f"Latest message: `{details.latest_message}`")
+            lines += [
                 "**Stack trace:**",
             ] + [_fmt_frame(f) for f in details.canonical_trace]
 
