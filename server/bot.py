@@ -19,6 +19,8 @@ from tracker.api import FrameSummary, GroupDetails, GroupSummary, Tracker
 logger = logging.getLogger(__name__)
 
 _MAX_MSG_LEN = 2000
+_EMOJI_MUTE = "\U0001F6AB"    # :no_entry:
+_EMOJI_RESOLVE = "\u2705"     # :white_check_mark:
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +266,47 @@ class ExceptionBot(commands.Bot):
                     self.tracker.clear_has_activity(fingerprint)
             finally:
                 self._refresh_running = False
+
+    # --- Reaction handlers ---
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """Mute or resolve a group when :no_entry: or :white_check_mark: is added."""
+        if payload.channel_id != self.channel_id:
+            return
+        if self.user and payload.user_id == self.user.id:
+            return
+        if payload.emoji.name not in (_EMOJI_MUTE, _EMOJI_RESOLVE):
+            return
+        fingerprint = self.tracker.get_fingerprint_by_discord_message_id(str(payload.message_id))
+        if fingerprint is None:
+            return
+        actor = payload.member.display_name if payload.member else str(payload.user_id)
+        if payload.emoji.name == _EMOJI_MUTE:
+            ok = self.tracker.mute_group(fingerprint, actor=actor)
+            action = "muted"
+        else:
+            ok = self.tracker.resolve_group(fingerprint, actor=actor)
+            action = "resolved"
+        if ok:
+            await self.edit_exception_message(fingerprint, str(payload.message_id))
+            logger.info("Reaction: %s group %s by %s", action, fingerprint[:8], actor)
+
+    async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
+        """Unmute a group when :no_entry: or :white_check_mark: is removed."""
+        if payload.channel_id != self.channel_id:
+            return
+        if self.user and payload.user_id == self.user.id:
+            return
+        if payload.emoji.name not in (_EMOJI_MUTE, _EMOJI_RESOLVE):
+            return
+        fingerprint = self.tracker.get_fingerprint_by_discord_message_id(str(payload.message_id))
+        if fingerprint is None:
+            return
+        ok = self.tracker.unmute_group(fingerprint)
+        if ok:
+            await self.edit_exception_message(fingerprint, str(payload.message_id))
+            logger.info("Reaction removed: unmuted group %s by user %d",
+                        fingerprint[:8], payload.user_id)
 
     # --- Slash command helpers ---
 

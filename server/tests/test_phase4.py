@@ -198,6 +198,30 @@ def test_run_expiry_only_includes_ids_for_expired_groups(fresh_api):
 
 
 # ===========================================================================
+# get_fingerprint_by_discord_message_id
+# ===========================================================================
+
+def test_get_fingerprint_by_discord_message_id_found(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fresh_api.set_discord_message_id(fp, "123456789012345678")
+    result = fresh_api.get_fingerprint_by_discord_message_id("123456789012345678")
+    assert result == fp
+
+
+def test_get_fingerprint_by_discord_message_id_not_found(fresh_api):
+    result = fresh_api.get_fingerprint_by_discord_message_id("999999999999999999")
+    assert result is None
+
+
+def test_get_fingerprint_by_discord_message_id_cleared(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    fresh_api.set_discord_message_id(fp, "555")
+    fresh_api.set_discord_message_id(fp, None)
+    result = fresh_api.get_fingerprint_by_discord_message_id("555")
+    assert result is None
+
+
+# ===========================================================================
 # get_fingerprint_by_short_id
 # ===========================================================================
 

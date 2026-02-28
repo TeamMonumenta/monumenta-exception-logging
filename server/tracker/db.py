@@ -113,6 +113,17 @@ def get_active_discord_messages(conn: sqlite3.Connection) -> list[tuple[str, str
     return [(row['fingerprint'], row['discord_message_id']) for row in rows]
 
 
+def get_fingerprint_by_discord_message_id(
+    conn: sqlite3.Connection, message_id: str
+) -> Optional[str]:
+    """Return the fingerprint for the group tracked with the given Discord message ID."""
+    row = conn.execute(
+        "SELECT fingerprint FROM error_groups WHERE discord_message_id = ?",
+        (message_id,)
+    ).fetchone()
+    return row['fingerprint'] if row is not None else None
+
+
 def clear_has_activity(conn: sqlite3.Connection, fingerprint: str) -> None:
     """Reset has_activity to 0 after a Discord message has been successfully edited."""
     with conn:

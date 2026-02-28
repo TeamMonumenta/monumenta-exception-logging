@@ -186,7 +186,7 @@ class Tracker:
                 """SELECT id, fingerprint, exception_class, message_template,
                           status, first_seen, last_seen, total_count
                    FROM error_groups
-                   WHERE first_seen >= ? AND first_seen < ?
+                   WHERE first_seen >= ? AND first_seen <= ?
                    ORDER BY first_seen DESC""",
                 (cutoff, end)
             ).fetchall()
@@ -409,6 +409,10 @@ class Tracker:
             (short_id,)
         ).fetchone()
         return row['fingerprint'] if row is not None else None
+
+    def get_fingerprint_by_discord_message_id(self, message_id: str) -> Optional[str]:
+        """Look up a fingerprint by its tracked Discord message ID."""
+        return db.get_fingerprint_by_discord_message_id(self._conn, message_id)
 
     # --- Maintenance ---
 
