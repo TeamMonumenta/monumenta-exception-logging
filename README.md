@@ -116,6 +116,23 @@ Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names a
 | `/unmute` | `short_id` | Unmute a group |
 | `/resolve` | `short_id` | Mark a group resolved |
 
+**Reaction shortcuts:**
+
+Reacting to an exception group message provides a faster alternative to slash commands for common
+triage actions:
+
+| Reaction | Effect |
+|---|---|
+| Add `:no_entry:` | Mute the group (equivalent to `/mute`) |
+| Add `:white_check_mark:` | Resolve the group (equivalent to `/resolve`) |
+| Remove `:no_entry:` or `:white_check_mark:` | Unmute the group (equivalent to `/unmute`) |
+| Add `:question:` | Receive a DM with full group details (equivalent to `/details`) |
+
+Removing either mute or resolve reaction always unmutes, regardless of whether other reactions of
+that type remain — making it easy to unmute an issue someone else muted. For `:question:`, the bot
+attempts to remove the reaction after sending the DM; this requires the **Manage Messages**
+permission and is skipped with a warning logged if not granted.
+
 ### Async model
 
 Quart (async Flask) and discord.py share a single asyncio event loop. SQLite calls use the

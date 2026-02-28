@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _MAX_MSG_LEN = 2000
 _EMOJI_MUTE = "\U0001F6AB"    # :no_entry:
 _EMOJI_RESOLVE = "\u2705"     # :white_check_mark:
+_EMOJI_QUESTION = "\u2753"    # :question:
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,31 @@ def _fmt_new_line(g: GroupSummary) -> str:
         f"(recent: {g.recent_count}, total: {g.total_count}) "
         f"servers: {servers}   last seen: <t:{last_ts}:f>"
     )
+
+
+def _fmt_details_lines(details: GroupDetails) -> list[str]:
+    """Build the line list for a group details response."""
+    short_id = details.fingerprint[:8]
+    lines = [
+        f"**Details: `{short_id}`**",
+        f"Class: `{details.exception_class}`",
+        f"Status: {details.status}",
+        f"First seen: <t:{int(details.first_seen.timestamp())}:f>",
+        f"Last seen: <t:{int(details.last_seen.timestamp())}:f>",
+        f"Total count: {details.total_count}",
+        f"Servers: {', '.join(sorted(details.servers_affected)) or 'none'}",
+        f"Logger: `{details.logger}`",
+    ]
+    if details.latest_message:
+        lines.append(f"Latest message: `{details.latest_message}`")
+    lines += ["**Stack trace:**"] + [_fmt_frame(f) for f in details.canonical_trace]
+    if details.muted_by:
+        ts = int(details.muted_at.timestamp()) if details.muted_at else 0
+        lines.insert(1, f"Muted by {details.muted_by} on <t:{ts}:f>")
+    if details.resolved_by:
+        ts = int(details.resolved_at.timestamp()) if details.resolved_at else 0
+        lines.insert(1, f"Resolved by {details.resolved_by} on <t:{ts}:f>")
+    return lines
 
 
 def _chunk_lines(lines: list[str], limit: int = _MAX_MSG_LEN) -> list[str]:
@@ -270,15 +296,18 @@ class ExceptionBot(commands.Bot):
     # --- Reaction handlers ---
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        """Mute or resolve a group when :no_entry: or :white_check_mark: is added."""
+        """Mute, resolve, or show details based on the reaction emoji."""
         if payload.channel_id != self.channel_id:
             return
         if self.user and payload.user_id == self.user.id:
             return
-        if payload.emoji.name not in (_EMOJI_MUTE, _EMOJI_RESOLVE):
+        if payload.emoji.name not in (_EMOJI_MUTE, _EMOJI_RESOLVE, _EMOJI_QUESTION):
             return
         fingerprint = self.tracker.get_fingerprint_by_discord_message_id(str(payload.message_id))
         if fingerprint is None:
+            return
+        if payload.emoji.name == _EMOJI_QUESTION:
+            await self._handle_question_reaction(payload, fingerprint)
             return
         actor = payload.member.display_name if payload.member else str(payload.user_id)
         if payload.emoji.name == _EMOJI_MUTE:
@@ -290,6 +319,51 @@ class ExceptionBot(commands.Bot):
         if ok:
             await self.edit_exception_message(fingerprint, str(payload.message_id))
             logger.info("Reaction: %s group %s by %s", action, fingerprint[:8], actor)
+
+    async def _handle_question_reaction(
+        self, payload: discord.RawReactionActionEvent, fingerprint: str
+    ) -> None:
+        """DM the reacting user with group details, then remove the :question: reaction."""
+        details = self.tracker.get_group_details(fingerprint)
+        if details is None:
+            return
+
+        # Resolve a user we can both DM and pass to remove_reaction.
+        # payload.member is populated for guild reactions; fall back to fetch_user.
+        dm_user: discord.User | discord.Member
+        if payload.member is not None:
+            dm_user = payload.member
+        else:
+            try:
+                dm_user = await self.fetch_user(payload.user_id)
+            except discord.DiscordException:
+                logger.exception("Could not fetch user %d for :question: DM", payload.user_id)
+                return
+
+        try:
+            for chunk in _chunk_lines(_fmt_details_lines(details)):
+                await dm_user.send(chunk)
+            logger.info("Reaction: DMed details for group %s to %s", fingerprint[:8], dm_user)
+        except discord.Forbidden:
+            logger.warning("Could not DM user %s (DMs may be disabled)", dm_user)
+        except discord.DiscordException:
+            logger.exception("Failed to DM details for group %s to %s", fingerprint[:8], dm_user)
+
+        # Remove the :question: reaction regardless of whether the DM succeeded.
+        channel = await self._get_channel()
+        if channel is None:
+            return
+        try:
+            message = await channel.fetch_message(payload.message_id)
+            await message.remove_reaction(payload.emoji, dm_user)
+        except discord.Forbidden:
+            logger.warning(
+                "No permission to remove :question: reaction on message %d", payload.message_id
+            )
+        except discord.DiscordException:
+            logger.exception(
+                "Failed to remove :question: reaction on message %d", payload.message_id
+            )
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         """Unmute a group when :no_entry: or :white_check_mark: is removed."""
@@ -422,30 +496,7 @@ class ExceptionBot(commands.Bot):
                     f"No group with short ID `{short_id}`.", ephemeral=True
                 )
                 return
-            lines = [
-                f"**Details: `{short_id}`**",
-                f"Class: `{details.exception_class}`",
-                f"Status: {details.status}",
-                f"First seen: <t:{int(details.first_seen.timestamp())}:f>",
-                f"Last seen: <t:{int(details.last_seen.timestamp())}:f>",
-                f"Total count: {details.total_count}",
-                f"Servers: {', '.join(sorted(details.servers_affected)) or 'none'}",
-                f"Logger: `{details.logger}`",
-            ]
-            if details.latest_message:
-                lines.append(f"Latest message: `{details.latest_message}`")
-            lines += [
-                "**Stack trace:**",
-            ] + [_fmt_frame(f) for f in details.canonical_trace]
-
-            if details.muted_by:
-                ts = int(details.muted_at.timestamp()) if details.muted_at else 0
-                lines.insert(1, f"Muted by {details.muted_by} on <t:{ts}:f>")
-            if details.resolved_by:
-                ts = int(details.resolved_at.timestamp()) if details.resolved_at else 0
-                lines.insert(1, f"Resolved by {details.resolved_by} on <t:{ts}:f>")
-
-            await _send_chunks(interaction, lines)
+            await _send_chunks(interaction, _fmt_details_lines(details))
 
         @self.tree.command(name=f"{p}mute", description="Mute an exception group")
         @app_commands.describe(short_id="8-character short ID of the group to mute")
