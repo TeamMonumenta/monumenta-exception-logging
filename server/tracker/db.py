@@ -71,6 +71,16 @@ def _create_tables(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_shc_hour_bucket
             ON server_hour_counts(hour_bucket);
+
+        CREATE TABLE IF NOT EXISTS notify_subscriptions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_user_id TEXT NOT NULL,
+            pattern         TEXT NOT NULL,
+            created_at      INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notify_user
+            ON notify_subscriptions(discord_user_id);
     """)
     conn.commit()
 
@@ -131,6 +141,63 @@ def clear_has_activity(conn: sqlite3.Connection, fingerprint: str) -> None:
             "UPDATE error_groups SET has_activity = 0 WHERE fingerprint = ?",
             (fingerprint,)
         )
+
+
+def add_notify_subscription(
+    conn: sqlite3.Connection, discord_user_id: str, pattern: str, created_at: int
+) -> int:
+    """Insert a new notify subscription and return its AUTOINCREMENT id."""
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO notify_subscriptions (discord_user_id, pattern, created_at) "
+            "VALUES (?, ?, ?)",
+            (discord_user_id, pattern, created_at)
+        )
+    row_id = cur.lastrowid
+    if row_id is None:
+        raise RuntimeError("INSERT into notify_subscriptions returned no lastrowid")
+    return row_id
+
+
+def count_notify_subscriptions(conn: sqlite3.Connection, discord_user_id: str) -> int:
+    """Return the number of subscriptions owned by the user."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM notify_subscriptions WHERE discord_user_id = ?",
+        (discord_user_id,)
+    ).fetchone()
+    return int(row['cnt'])
+
+
+def list_notify_subscriptions(
+    conn: sqlite3.Connection, discord_user_id: str
+) -> list[tuple[int, str, int]]:
+    """Return [(id, pattern, created_at), ...] for the user, ordered by id ascending."""
+    rows = conn.execute(
+        "SELECT id, pattern, created_at FROM notify_subscriptions "
+        "WHERE discord_user_id = ? ORDER BY id",
+        (discord_user_id,)
+    ).fetchall()
+    return [(row['id'], row['pattern'], row['created_at']) for row in rows]
+
+
+def remove_notify_subscription(
+    conn: sqlite3.Connection, discord_user_id: str, sub_id: int
+) -> bool:
+    """Delete a subscription by id, scoped to the owning user. Returns True if a row was deleted."""
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM notify_subscriptions WHERE id = ? AND discord_user_id = ?",
+            (sub_id, discord_user_id)
+        )
+    return cur.rowcount > 0
+
+
+def get_all_notify_subscriptions(conn: sqlite3.Connection) -> list[tuple[int, str, str]]:
+    """Return [(id, discord_user_id, pattern), ...] for all subscriptions, ordered by id."""
+    rows = conn.execute(
+        "SELECT id, discord_user_id, pattern FROM notify_subscriptions ORDER BY id"
+    ).fetchall()
+    return [(row['id'], row['discord_user_id'], row['pattern']) for row in rows]
 
 
 def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any]:

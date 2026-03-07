@@ -21,6 +21,7 @@ disable=
     too-many-positional-arguments,
     too-many-statements,
     too-few-public-methods,
+    too-many-public-methods,
     line-too-long,
     # pytest fixtures shadow outer scope by design
     redefined-outer-name,

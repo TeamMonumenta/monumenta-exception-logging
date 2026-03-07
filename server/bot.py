@@ -8,6 +8,7 @@ evolves, and provides slash commands for querying and managing groups.
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 import discord
@@ -19,6 +20,8 @@ from tracker.api import FrameSummary, GroupDetails, GroupSummary, Tracker
 logger = logging.getLogger(__name__)
 
 _MAX_MSG_LEN = 2000
+_MAX_NOTIFY_SUBS = 100   # maximum subscriptions per user
+_NOTIFY_TEST_LIMIT = 5   # max DMs sent by /notify test
 _EMOJI_MUTE = "\U0001F6AB"    # :no_entry:
 _EMOJI_RESOLVE = "\u2705"     # :white_check_mark:
 _EMOJI_QUESTION = "\u2753"    # :question:
@@ -64,8 +67,12 @@ def _build_frames_block(frame_lines: list[str], available: int) -> str:
     return result
 
 
-def format_exception_message(details: GroupDetails) -> str:
-    """Build the Discord channel message for an exception group (max 2000 chars)."""
+def format_exception_message(details: GroupDetails, max_len: int = _MAX_MSG_LEN) -> str:
+    """Build the Discord channel message for an exception group.
+
+    Fits within max_len characters (default 2000). Pass a smaller value when
+    the message will be prefixed with additional header text (e.g. notify DMs).
+    """
     fp8 = details.fingerprint[:8]
     first_ts = int(details.first_seen.timestamp())
     last_ts = int(details.last_seen.timestamp())
@@ -103,10 +110,41 @@ def format_exception_message(details: GroupDetails) -> str:
         wrap_suffix = ""
 
     fixed = wrap_prefix + header + error_open + error_close + wrap_suffix
-    available = _MAX_MSG_LEN - len(fixed)
+    available = max_len - len(fixed)
     frames_block = _build_frames_block(frame_lines, available)
 
     return wrap_prefix + header + error_open + frames_block + error_close + wrap_suffix
+
+
+def format_notify_dm(details: GroupDetails, matching_rules: list[tuple[int, str]]) -> str:
+    """Build the DM content for a notify alert.
+
+    Prepends a header listing the matched rule IDs and patterns, then includes
+    the standard exception message truncated to fit within _MAX_MSG_LEN total.
+    """
+    rule_parts = ", ".join(f"#{sub_id} (`{pattern}`)" for sub_id, pattern in matching_rules)
+    header = f"Matched notify rule(s): {rule_parts}\n"
+    body = format_exception_message(details, max_len=_MAX_MSG_LEN - len(header))
+    return header + body
+
+
+def _matches_notify(pattern: str, details: GroupDetails) -> bool:
+    """Return True if the regex pattern matches any searchable field of the group.
+
+    Searches the same three fields as /search: exception class, normalized
+    message template, and canonical trace (reconstructed as a text blob of
+    class.method(file) entries). Match is case-sensitive.
+    """
+    rx = re.compile(pattern)
+    trace_text = " ".join(
+        f"{f.class_name}.{f.method}({f.file or 'Unknown'})"
+        for f in details.canonical_trace
+    )
+    return bool(
+        rx.search(details.exception_class)
+        or rx.search(details.message_template)
+        or rx.search(trace_text)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +263,9 @@ class ExceptionBot(commands.Bot):
         return channel  # type: ignore[return-value]
 
     async def post_new_exception(self, fingerprint: str) -> None:
-        """Send a new channel message for a freshly-observed exception group."""
+        """Send a new channel message for a freshly-observed exception group,
+        then DM any users whose notify subscriptions match the group.
+        """
         channel = await self._get_channel()
         if channel is None:
             return
@@ -238,6 +278,46 @@ class ExceptionBot(commands.Bot):
             self.tracker.set_discord_message_id(fingerprint, str(message.id))
         except discord.DiscordException:
             logger.exception("Failed to post exception message for %s", fingerprint)
+        await self._notify_subscribers(details)
+
+    async def _notify_subscribers(self, details: GroupDetails) -> None:
+        """DM users whose notify subscriptions match a newly-observed group.
+
+        Iterates all subscriptions, groups matching rules by Discord user, and
+        sends one DM per user listing every matched rule ID and pattern followed
+        by the standard exception message.
+        """
+        subs = self.tracker.get_all_notify_subscriptions()
+        if not subs:
+            return
+
+        # Collect all matching (sub_id, pattern) pairs per user.
+        user_matches: dict[str, list[tuple[int, str]]] = {}
+        for sub_id, discord_user_id, pattern in subs:
+            try:
+                if _matches_notify(pattern, details):
+                    user_matches.setdefault(discord_user_id, []).append((sub_id, pattern))
+            except re.error:
+                # Pattern somehow invalid (shouldn't happen — validated at add time).
+                logger.warning("Invalid notify pattern #%d: %s", sub_id, pattern)
+
+        for discord_user_id, matching_rules in user_matches.items():
+            try:
+                user = await self.fetch_user(int(discord_user_id))
+                content = format_notify_dm(details, matching_rules)
+                await user.send(content)
+                logger.info(
+                    "Notified user %s about group %s via rule(s) %s",
+                    discord_user_id,
+                    details.fingerprint[:8],
+                    [r[0] for r in matching_rules],
+                )
+            except discord.NotFound:
+                logger.warning("Could not find user %s for notify DM", discord_user_id)
+            except discord.Forbidden:
+                logger.warning("Could not DM user %s for notify (DMs disabled)", discord_user_id)
+            except discord.DiscordException:
+                logger.exception("Failed to DM user %s for notify", discord_user_id)
 
     async def edit_exception_message(self, fingerprint: str, message_id: str) -> None:
         """Edit an existing channel message with current group data."""
@@ -564,3 +644,144 @@ class ExceptionBot(commands.Bot):
                     await self.edit_exception_message(fingerprint, msg_id)
                     break
             await interaction.followup.send(f"Resolved `{short_id}`.", ephemeral=True)
+
+        # --- /notify subcommand group ---
+
+        notify_group = app_commands.Group(
+            name=f"{p}notify",
+            description="Manage personal exception notification subscriptions",
+        )
+
+        @notify_group.command(
+            name="add",
+            description=f"Add a regex notification rule (max {_MAX_NOTIFY_SUBS} per user)",
+        )
+        @app_commands.describe(
+            pattern="Python regex (case-sensitive) matched against exception class, "
+                    "message, and stack trace"
+        )
+        async def notify_add(interaction: discord.Interaction, pattern: str) -> None:
+            await interaction.response.defer(ephemeral=True)
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                await interaction.followup.send(
+                    f"Invalid regex: {exc}", ephemeral=True
+                )
+                return
+            user_id = str(interaction.user.id)
+            try:
+                sub_id = self.tracker.add_notify_subscription(user_id, pattern)
+            except ValueError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            await interaction.followup.send(
+                f"Added notify rule #{sub_id}: `{pattern}`", ephemeral=True
+            )
+
+        @notify_group.command(name="list", description="List your notification rules")
+        async def notify_list(interaction: discord.Interaction) -> None:
+            await interaction.response.defer(ephemeral=True)
+            user_id = str(interaction.user.id)
+            subs = self.tracker.list_notify_subscriptions(user_id)
+            if not subs:
+                await interaction.followup.send("You have no notify rules.", ephemeral=True)
+                return
+            lines = ["**Your notify rules:**"] + [
+                f"#{sub_id} — `{pat}` (added <t:{int(created_at.timestamp())}:f>)"
+                for sub_id, pat, created_at in subs
+            ]
+            await _send_chunks(interaction, lines)
+
+        @notify_group.command(name="remove", description="Remove a notification rule by ID")
+        @app_commands.describe(sub_id="Rule ID as shown in /notify list")
+        async def notify_remove(interaction: discord.Interaction, sub_id: int) -> None:
+            await interaction.response.defer(ephemeral=True)
+            user_id = str(interaction.user.id)
+            ok = self.tracker.remove_notify_subscription(user_id, sub_id)
+            if not ok:
+                await interaction.followup.send(
+                    f"No rule with ID #{sub_id} found.", ephemeral=True
+                )
+                return
+            await interaction.followup.send(
+                f"Removed notify rule #{sub_id}.", ephemeral=True
+            )
+
+        @notify_group.command(
+            name="test",
+            description=f"Test a rule against all active groups (sends up to {_NOTIFY_TEST_LIMIT} DMs)",
+        )
+        @app_commands.describe(sub_id="Rule ID to test")
+        async def notify_test(interaction: discord.Interaction, sub_id: int) -> None:
+            await interaction.response.defer(ephemeral=True)
+            user_id = str(interaction.user.id)
+            user_subs = self.tracker.list_notify_subscriptions(user_id)
+            sub = next((s for s in user_subs if s[0] == sub_id), None)
+            if sub is None:
+                await interaction.followup.send(
+                    f"No rule with ID #{sub_id} found.", ephemeral=True
+                )
+                return
+            _, pattern, _ = sub
+            try:
+                rx = re.compile(pattern)
+            except re.error:
+                await interaction.followup.send(
+                    f"Rule #{sub_id} has an invalid pattern.", ephemeral=True
+                )
+                return
+
+            fingerprints = self.tracker.get_active_fingerprints()
+            sent = 0
+            total_matches = 0
+            for fp in fingerprints:
+                details = self.tracker.get_group_details(fp)
+                if details is None:
+                    continue
+                trace_text = " ".join(
+                    f"{f.class_name}.{f.method}({f.file or 'Unknown'})"
+                    for f in details.canonical_trace
+                )
+                matched = bool(
+                    rx.search(details.exception_class)
+                    or rx.search(details.message_template)
+                    or rx.search(trace_text)
+                )
+                if not matched:
+                    continue
+                total_matches += 1
+                if sent < _NOTIFY_TEST_LIMIT:
+                    try:
+                        content = format_notify_dm(details, [(sub_id, pattern)])
+                        await interaction.user.send(content)
+                        sent += 1
+                    except discord.Forbidden:
+                        await interaction.followup.send(
+                            "Could not send DM (your DMs may be disabled).", ephemeral=True
+                        )
+                        return
+                    except discord.DiscordException:
+                        logger.exception(
+                            "Failed to DM test result for rule #%d to user %s",
+                            sub_id, user_id
+                        )
+
+            if total_matches == 0:
+                await interaction.followup.send(
+                    f"Rule #{sub_id} matched no active groups.", ephemeral=True
+                )
+            elif total_matches <= _NOTIFY_TEST_LIMIT:
+                await interaction.followup.send(
+                    f"Rule #{sub_id} matched {total_matches} group(s); sent {sent} DM(s).",
+                    ephemeral=True,
+                )
+            else:
+                extra = total_matches - _NOTIFY_TEST_LIMIT
+                await interaction.followup.send(
+                    f"Rule #{sub_id} matched {total_matches} group(s); "
+                    f"sent {_NOTIFY_TEST_LIMIT} DMs ({extra} more matched, not sent).",
+                    ephemeral=True,
+                )
+
+        self.tree.add_command(notify_group)

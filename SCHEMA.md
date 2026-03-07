@@ -98,6 +98,38 @@ DO UPDATE SET count = count + 1;
 
 ---
 
+### `notify_subscriptions`
+
+Per-user regex notification rules. When a new exception group is first observed,
+the bot checks all subscriptions and DMs matching users.
+
+```sql
+CREATE TABLE notify_subscriptions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_user_id TEXT NOT NULL,   -- Discord user snowflake ID (stored as text)
+    pattern         TEXT NOT NULL,   -- Python regex, validated at insert time
+    created_at      INTEGER NOT NULL -- epoch seconds
+);
+
+CREATE INDEX idx_notify_user ON notify_subscriptions(discord_user_id);
+```
+
+**Notes:**
+
+- `id` uses `AUTOINCREMENT` — IDs are monotonically increasing and are never reused
+  after deletion. This makes IDs safe to reference in DMs (`Matched notify rule #5`)
+  even after other rules have been removed.
+- `discord_user_id` is the Discord user snowflake as a string (e.g. `"123456789012345678"`).
+- `pattern` is stored as-is (Python `re.compile` is called at add time to validate).
+  Matching at notification time uses `re.search` (case-sensitive) against three fields:
+  exception class, normalized message template, and canonical trace (as a text blob).
+- Maximum 100 subscriptions per user. This limit is enforced by the API layer, not a
+  database constraint.
+- This table is not subject to the `EXPIRY_DAYS` retention window — subscriptions
+  persist until explicitly removed by the user.
+
+---
+
 ## Fingerprinting Algorithm
 
 The fingerprint is computed by the Python ingest service from the raw event. It must be stable across re-occurrences of the same logical bug.

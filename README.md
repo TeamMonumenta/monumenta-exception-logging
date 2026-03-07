@@ -115,6 +115,24 @@ Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names a
 | `/mute` | `short_id` | Mute a group |
 | `/unmute` | `short_id` | Unmute a group |
 | `/resolve` | `short_id` | Mark a group resolved |
+| `/notify add` | `pattern` | Add a personal notification rule (Python regex) |
+| `/notify list` | — | List your notification rules with their IDs |
+| `/notify remove` | `id` | Remove a notification rule by ID |
+| `/notify test` | `id` | Test a rule against all active groups (sends up to 5 DMs) |
+
+**Personal notifications:**
+
+Users can subscribe to be DMed whenever a new exception group is first observed. Each subscription
+is a Python regex (case-sensitive) matched against the exception class, normalized message, and
+stack trace. When a new group matches one or more of your rules, you receive a single DM listing
+every matched rule ID and pattern, followed by the full exception message.
+
+Rule IDs are stable integers that never change or get reused after deletion, so an ID seen in a DM
+always refers to the same rule (or no longer exists if you removed it). There is a maximum of 100
+rules per user.
+
+`/notify test` scans all active (non-muted, non-resolved) groups and sends a DM for each match,
+capped at 5 to avoid inbox flooding. Use it to verify a new pattern before relying on it.
 
 **Reaction shortcuts:**
 

@@ -418,6 +418,43 @@ class Tracker:
         """Look up a fingerprint by its tracked Discord message ID."""
         return db.get_fingerprint_by_discord_message_id(self._conn, message_id)
 
+    # --- Notify subscriptions ---
+
+    def add_notify_subscription(self, discord_user_id: str, pattern: str) -> int:
+        """Store a new notify subscription. Returns the stable DB id.
+
+        Raises ValueError if the user already has 100 subscriptions.
+        The caller must validate the regex before calling this method.
+        """
+        if db.count_notify_subscriptions(self._conn, discord_user_id) >= 100:
+            raise ValueError("Maximum of 100 notify subscriptions per user")
+        return db.add_notify_subscription(
+            self._conn, discord_user_id, pattern, int(time.time())
+        )
+
+    def list_notify_subscriptions(
+        self, discord_user_id: str
+    ) -> list[tuple[int, str, datetime]]:
+        """Return [(id, pattern, created_at), ...] for the user's subscriptions, ordered by id."""
+        rows = db.list_notify_subscriptions(self._conn, discord_user_id)
+        return [(sub_id, pattern, _ts_to_dt(ts)) for sub_id, pattern, ts in rows]
+
+    def remove_notify_subscription(self, discord_user_id: str, sub_id: int) -> bool:
+        """Remove subscription by its DB id, scoped to the owning user."""
+        return db.remove_notify_subscription(self._conn, discord_user_id, sub_id)
+
+    def get_all_notify_subscriptions(self) -> list[tuple[int, str, str]]:
+        """Return [(sub_id, discord_user_id, pattern), ...] for all subscriptions."""
+        return db.get_all_notify_subscriptions(self._conn)
+
+    def get_active_fingerprints(self) -> list[str]:
+        """Return fingerprints of all active groups, newest first."""
+        rows = self._conn.execute(
+            "SELECT fingerprint FROM error_groups WHERE status = 'active' "
+            "ORDER BY last_seen DESC"
+        ).fetchall()
+        return [row['fingerprint'] for row in rows]
+
     # --- Maintenance ---
 
     def run_expiry(self) -> dict[str, Any]:
