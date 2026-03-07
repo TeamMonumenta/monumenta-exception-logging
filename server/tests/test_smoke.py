@@ -144,6 +144,24 @@ def test_search_groups(fresh_api):
     assert results[0].exception_class == 'java.lang.Exception'
 
 
+def test_search_groups_by_stack_frame_file(fresh_api):
+    """Search should match file names anywhere in the canonical_trace JSON."""
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))    # has BossManager.java
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))  # has ItemHandler.java only
+    results = fresh_api.search_groups('BossManager.java')
+    assert len(results) == 1
+    assert results[0].exception_class == 'java.lang.Exception'
+
+
+def test_search_groups_by_stack_frame_class(fresh_api):
+    """Search should match class names in the canonical_trace JSON."""
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))    # has BossManager
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))  # has ItemHandler
+    results = fresh_api.search_groups('ItemHandler')
+    assert len(results) == 1
+    assert results[0].exception_class == 'java.lang.NullPointerException'
+
+
 def test_get_groups_for_server(fresh_api):
     fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
     fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))

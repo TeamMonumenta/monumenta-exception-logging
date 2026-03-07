@@ -434,8 +434,8 @@ class ExceptionBot(commands.Bot):
             lines = [header] + [_fmt_new_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name=f"{p}search", description="Search exception groups by class or message")
-        @app_commands.describe(query="Substring to search for in exception class or message")
+        @self.tree.command(name=f"{p}search", description="Search exception groups by class, message, or stack frame")
+        @app_commands.describe(query="Substring to search for in exception class, message, or stack trace (e.g. ParticleManager.java)")
         async def cmd_search(interaction: discord.Interaction, query: str) -> None:
             await interaction.response.defer(ephemeral=True)
             groups = self.tracker.search_groups(query)

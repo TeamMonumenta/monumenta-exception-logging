@@ -292,7 +292,10 @@ class Tracker:
         return result
 
     def search_groups(self, query: str, limit: int = 20, window_hours: int = 24) -> list[GroupSummary]:
-        """Case-insensitive substring search over exception_class and message_template.
+        """Case-insensitive substring search over exception_class, message_template, and canonical_trace.
+
+        canonical_trace is stored as a JSON text blob, so a LIKE match over it catches file names
+        (e.g. "ParticleManager.java"), class names, and method names anywhere in the full stack trace.
 
         Includes groups of all statuses.
         """
@@ -304,9 +307,10 @@ class Tracker:
                FROM error_groups
                WHERE LOWER(exception_class) LIKE ?
                   OR LOWER(message_template) LIKE ?
+                  OR LOWER(canonical_trace) LIKE ?
                ORDER BY last_seen DESC
                LIMIT ?""",
-            (pattern, pattern, limit)
+            (pattern, pattern, pattern, limit)
         ).fetchall()
         result: list[GroupSummary] = []
         for row in rows:
