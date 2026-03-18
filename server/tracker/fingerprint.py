@@ -8,20 +8,24 @@ _UUID_RE = re.compile(
     r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
     re.IGNORECASE,
 )
+_BARE_UUID_RE = re.compile(r'\b[0-9a-f]{32}\b', re.IGNORECASE)
 _IP_RE = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b')
 _LONG_NUM_RE = re.compile(r'\b\d{4,}\b')
 _QUOTED_SINGLE_RE = re.compile(r"'[^']{1,64}'")
 _QUOTED_DOUBLE_RE = re.compile(r'"[^"]{1,64}"')
 _BRACKET_DATA_RE = re.compile(r'\[[^\[\]]{0,256}\]')
+_LONG_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{31,}')
 
 
 def normalize_message(message: str) -> str:
     s = _UUID_RE.sub('<uuid>', message)
+    s = _BARE_UUID_RE.sub('<uuid>', s)
     s = _IP_RE.sub('<ip>', s)
     s = _LONG_NUM_RE.sub('<N>', s)
     s = _QUOTED_SINGLE_RE.sub('<str>', s)
     s = _QUOTED_DOUBLE_RE.sub('<str>', s)
     s = _BRACKET_DATA_RE.sub('<data>', s)
+    s = _LONG_TOKEN_RE.sub('<id>', s)
     return s
 
 

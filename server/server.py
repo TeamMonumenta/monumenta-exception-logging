@@ -143,6 +143,9 @@ async def main():
     )
 
     tracker = Tracker(config)
+    result = tracker.migrate_fingerprints()
+    if result['updated'] or result['merged']:
+        logger.info('Fingerprint migration: %s', result)
 
     # Register signal handlers so both Ctrl+C and Kubernetes SIGTERM trigger a clean shutdown.
     stop = asyncio.Event()

@@ -81,6 +81,10 @@ def _create_tables(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_notify_user
             ON notify_subscriptions(discord_user_id);
+
+        CREATE TABLE IF NOT EXISTS pending_discord_deletes (
+            message_id TEXT PRIMARY KEY
+        );
     """)
     conn.commit()
 
@@ -198,6 +202,114 @@ def get_all_notify_subscriptions(conn: sqlite3.Connection) -> list[tuple[int, st
         "SELECT id, discord_user_id, pattern FROM notify_subscriptions ORDER BY id"
     ).fetchall()
     return [(row['id'], row['discord_user_id'], row['pattern']) for row in rows]
+
+
+def migrate_fingerprints(
+    conn: sqlite3.Connection, app_packages: list[str]
+) -> dict[str, Any]:
+    """Re-fingerprint all groups with the current normalization rules.
+
+    Returns a summary dict: {updated: N, merged: M, orphaned_discord_ids: [...]}.
+    Inserts any orphaned Discord message IDs into pending_discord_deletes.
+    All DB writes occur in a single transaction.
+    """
+    import json  # pylint: disable=import-outside-toplevel
+    from .fingerprint import (  # pylint: disable=import-outside-toplevel
+        compute_fingerprint, normalize_message, extract_app_frames,
+    )
+
+    rows = conn.execute(
+        "SELECT id, fingerprint, exception_class, message_template, "
+        "canonical_frames, discord_message_id, total_count, first_seen, last_seen "
+        "FROM error_groups"
+    ).fetchall()
+
+    updated = 0
+    merged = 0
+    orphaned_discord_ids: list[str] = []
+
+    with conn:
+        for row in rows:
+            frames = json.loads(row['canonical_frames'])
+            new_normalized = normalize_message(row['message_template'])
+            top_frames = extract_app_frames(frames, app_packages, 3)
+            new_fp = compute_fingerprint(row['exception_class'], new_normalized, top_frames)
+
+            if new_fp == row['fingerprint']:
+                continue
+
+            winner = conn.execute(
+                "SELECT id, total_count, first_seen, last_seen, discord_message_id "
+                "FROM error_groups WHERE fingerprint = ?",
+                (new_fp,)
+            ).fetchone()
+
+            if winner is None:
+                conn.execute(
+                    "UPDATE error_groups SET fingerprint = ?, message_template = ?, has_activity = 1 "
+                    "WHERE id = ?",
+                    (new_fp, new_normalized, row['id'])
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    "UPDATE error_groups SET total_count = ?, first_seen = ?, last_seen = ?, "
+                    "has_activity = 1 WHERE id = ?",
+                    (
+                        winner['total_count'] + row['total_count'],
+                        min(winner['first_seen'], row['first_seen']),
+                        max(winner['last_seen'], row['last_seen']),
+                        winner['id'],
+                    )
+                )
+                conn.execute(
+                    "UPDATE occurrences SET group_id = ? WHERE group_id = ?",
+                    (winner['id'], row['id'])
+                )
+                conn.execute(
+                    """INSERT INTO server_hour_counts (group_id, server, hour_bucket, count)
+                       SELECT ?, server, hour_bucket, count
+                       FROM server_hour_counts WHERE group_id = ?
+                       ON CONFLICT (group_id, server, hour_bucket)
+                       DO UPDATE SET count = count + excluded.count""",
+                    (winner['id'], row['id'])
+                )
+                conn.execute(
+                    "DELETE FROM server_hour_counts WHERE group_id = ?",
+                    (row['id'],)
+                )
+                if row['discord_message_id'] is not None:
+                    if winner['discord_message_id'] is None:
+                        # Winner has no Discord message — adopt the loser's instead of deleting it.
+                        conn.execute(
+                            "UPDATE error_groups SET discord_message_id = ? WHERE id = ?",
+                            (row['discord_message_id'], winner['id'])
+                        )
+                    else:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO pending_discord_deletes VALUES (?)",
+                            (row['discord_message_id'],)
+                        )
+                        orphaned_discord_ids.append(row['discord_message_id'])
+                conn.execute("DELETE FROM error_groups WHERE id = ?", (row['id'],))
+                merged += 1
+
+    return {'updated': updated, 'merged': merged, 'orphaned_discord_ids': orphaned_discord_ids}
+
+
+def add_pending_discord_delete(conn: sqlite3.Connection, message_id: str) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO pending_discord_deletes VALUES (?)",
+            (message_id,)
+        )
+
+
+def pop_pending_discord_deletes(conn: sqlite3.Connection) -> list[str]:
+    with conn:
+        rows = conn.execute("SELECT message_id FROM pending_discord_deletes").fetchall()
+        conn.execute("DELETE FROM pending_discord_deletes")
+    return [row['message_id'] for row in rows]
 
 
 def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any]:

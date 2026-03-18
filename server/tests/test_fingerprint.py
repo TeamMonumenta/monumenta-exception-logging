@@ -180,6 +180,49 @@ class TestNormalizeMessage:
         second = normalize_message(first)
         assert first == second
 
+    def test_bare_uuid_replaced(self):
+        msg = ('Failed to read from https://sessionserver.mojang.com/session/minecraft/profile/'
+               '3601df3d96f54dc1b10b8a4ebcefd210?unsigned=false due to Read timed out')
+        result = normalize_message(msg)
+        assert '<uuid>' in result
+        assert '3601df3d96f54dc1b10b8a4ebcefd210' not in result
+
+    def test_bare_uuid_requires_word_boundary(self):
+        # 33-char hex — _BARE_UUID_RE must not fire (no word boundary after char 32).
+        # The whole 33-char token is caught by _LONG_TOKEN_RE instead.
+        msg = 'token=3601df3d96f54dc1b10b8a4ebcefd210x end'
+        result = normalize_message(msg)
+        assert '<uuid>' not in result
+        assert '<id>' in result
+
+    def test_long_opaque_token_replaced(self):
+        token = '20260317T210746Z-r1db49788ddzpxgmhC1YTOzpg800000001fg000000006ta5'
+        msg = f'<span>{token}</span>'
+        result = normalize_message(msg)
+        assert '<id>' in result
+        assert token not in result
+
+    def test_short_alphanumeric_not_replaced(self):
+        # 20-char token — under the 32-char threshold, must not be replaced.
+        msg = 'error code ABC12345678901234567890 end'
+        result = normalize_message(msg)
+        assert 'ABC12345678901234567890' in result
+        assert '<id>' not in result
+
+    def test_bad1_pair_same_fingerprint(self):
+        # Two Mojang auth timeouts differing only in the unhyphenated player UUID.
+        msg1 = ('Failed to read from https://sessionserver.mojang.com/session/minecraft/profile/'
+                '3601df3d96f54dc1b10b8a4ebcefd210?unsigned=false due to Read timed out')
+        msg2 = ('Failed to read from https://sessionserver.mojang.com/session/minecraft/profile/'
+                'ab7cb32502bc45048c6a45ca7f170dad?unsigned=false due to Read timed out')
+        assert normalize_message(msg1) == normalize_message(msg2)
+
+    def test_bad2_pair_same_fingerprint(self):
+        # Two CDN/WAF block pages differing only in the opaque correlation ID.
+        msg1 = 'request blocked, ref: 20260317T210746Z-r1db49788ddzpxgmhC1YTOzpg800000001fg000000006ta5'
+        msg2 = 'request blocked, ref: 20260317T210746Z-r1db49788dd97n9rhC1YTOp5cs00000001tg00000000fh40'
+        assert normalize_message(msg1) == normalize_message(msg2)
+
 
 # ===========================================================================
 # extract_app_frames

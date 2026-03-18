@@ -130,6 +130,29 @@ CREATE INDEX idx_notify_user ON notify_subscriptions(discord_user_id);
 
 ---
 
+### `pending_discord_deletes`
+
+Discord message IDs queued for deletion. Populated by the startup fingerprint migration when two
+groups are merged (the loser's channel message is orphaned and must be deleted). The bot's refresh
+loop drains this table each tick, deleting each listed message from the channel.
+
+```sql
+CREATE TABLE pending_discord_deletes (
+    message_id TEXT PRIMARY KEY
+);
+```
+
+**Notes:**
+
+- Rows are inserted by `migrate_fingerprints()` at server startup whenever a merge occurs and the
+  losing group had a `discord_message_id`.
+- The bot's `_refresh_loop` calls `pop_pending_discord_deletes()` (atomic SELECT + DELETE) and
+  issues one Discord API delete per returned ID.
+- If the bot is not running, the IDs accumulate in this table until it starts. The table is small
+  in practice (one row per merged group per deployment).
+
+---
+
 ## Fingerprinting Algorithm
 
 The fingerprint is computed by the Python ingest service from the raw event. It must be stable across re-occurrences of the same logical bug.
@@ -137,11 +160,15 @@ The fingerprint is computed by the Python ingest service from the raw event. It 
 **Inputs:**
 1. `exception_class` — taken directly from the event.
 2. `normalized_message` — the exception's `message` field with variable content replaced by tokens. Normalization rules (applied in order):
-   - UUIDs → `<uuid>` (pattern: `[0-9a-f]{8}-[0-9a-f]{4}-...-[0-9a-f]{12}`)
+   - Hyphenated UUIDs → `<uuid>` (pattern: `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+   - Bare (unhyphenated) UUIDs → `<uuid>` (pattern: `\b[0-9a-f]{32}\b`; catches player UUIDs embedded in Mojang auth session URLs, e.g. `/profile/3601df3d96f54dc1b10b8a4ebcefd210?unsigned=false`)
    - IP addresses → `<ip>`
    - Long numbers (≥ 4 digits) → `<N>` (catches coordinates, entity IDs, counts)
    - Quoted string values → `<str>` (pattern: `'[^']{1,64}'` or `"[^"]{1,64}"`)
    - Sequences of tags/NBT-like content in brackets → `<data>`
+   - Long opaque alphanumeric tokens (≥ 32 characters composed of `[A-Za-z0-9_-]`) → `<id>` (catches CDN/WAF request IDs, auth tokens, hashes, etc. — any long token that isn't a bare UUID)
+
+   Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`.
 3. `top_app_frames` — the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
 
 **Hash:**
@@ -177,6 +204,31 @@ DELETE FROM error_groups WHERE last_seen < strftime('%s', 'now') - 1209600;
 ```
 
 The cascade deletes on `occurrences` and `server_hour_counts` (via `ON DELETE CASCADE`) ensure referential integrity when groups are removed.
+
+---
+
+## Startup Fingerprint Migration
+
+Every time the server starts, `migrate_fingerprints()` re-fingerprints all existing groups using
+the current normalization rules. This handles the case where normalization rules are tightened
+(e.g. a new token type is added) and previously separate groups should now be merged.
+
+**Algorithm (single transaction):**
+
+1. For each group, re-compute the fingerprint from its stored `exception_class`,
+   `message_template` (re-normalized), and `canonical_frames`.
+2. If the new fingerprint equals the stored one, skip (no change).
+3. If no other group has the new fingerprint, update the row in place (`fingerprint` and
+   `message_template` columns only).
+4. If another group already has the new fingerprint (a merge), fold the current group (the
+   "loser") into that group (the "winner"):
+   - Add counts and extend `first_seen` / `last_seen` on the winner.
+   - Re-parent all `occurrences` and merge `server_hour_counts` (upsert).
+   - Queue the loser's `discord_message_id` (if any) in `pending_discord_deletes`.
+   - Delete the loser group row.
+
+The migration is a no-op on fresh databases and on restarts where normalization rules have not
+changed. It logs a summary only when at least one group was updated or merged.
 
 ---
 

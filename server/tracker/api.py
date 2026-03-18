@@ -455,6 +455,20 @@ class Tracker:
         ).fetchall()
         return [row['fingerprint'] for row in rows]
 
+    # --- Fingerprint migration ---
+
+    def migrate_fingerprints(self) -> dict[str, Any]:
+        """Re-fingerprint all groups with the current normalization rules."""
+        return db.migrate_fingerprints(self._conn, self._config.app_packages)
+
+    def add_pending_discord_delete(self, message_id: str) -> None:
+        """Queue a Discord message ID for deletion on the next refresh loop tick."""
+        db.add_pending_discord_delete(self._conn, message_id)
+
+    def pop_pending_discord_deletes(self) -> list[str]:
+        """Return and clear all pending Discord message IDs queued for deletion."""
+        return db.pop_pending_discord_deletes(self._conn)
+
     # --- Maintenance ---
 
     def run_expiry(self) -> dict[str, Any]:

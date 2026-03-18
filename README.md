@@ -75,9 +75,24 @@ Each exception is fingerprinted by hashing three components: exception class + n
 top 3 application stack frames (`class.method` only, no line numbers). Line numbers are excluded
 so minor code edits that shift lines don't create new groups.
 
-The normalization step replaces UUIDs, IPs, long numbers, quoted strings, and bracket data with
-tokens (`<uuid>`, `<ip>`, `<N>`, `<str>`, `<data>`) so the same logical bug groups together even
-when the exception message contains variable runtime content.
+The normalization step replaces variable runtime content with stable tokens so the same logical
+bug always groups together:
+
+| Pattern | Token | Examples |
+|---|---|---|
+| Hyphenated UUID | `<uuid>` | `550e8400-e29b-41d4-a716-446655440000` |
+| Bare (unhyphenated) UUID | `<uuid>` | `3601df3d96f54dc1b10b8a4ebcefd210` (Mojang auth URLs) |
+| IP address | `<ip>` | `192.168.1.100` |
+| Long number (≥ 4 digits) | `<N>` | coordinates, entity IDs, task IDs |
+| Quoted string (single or double) | `<str>` | entity names, class names in NPE messages |
+| Bracket data | `<data>` | boss tag lists, NBT |
+| Long opaque token (≥ 32 `[A-Za-z0-9_-]` chars) | `<id>` | CDN/WAF request IDs, auth tokens, hashes |
+
+At startup the server automatically re-fingerprints all existing groups using the current
+normalization rules. Groups whose fingerprint changes are updated in place; groups that become
+identical after re-normalization are merged (counts and occurrence records are combined, and any
+orphaned Discord messages for the removed duplicate are deleted by the bot's next refresh tick).
+The migration is logged only when something changed, so normal restarts are quiet.
 
 See [SCHEMA.md](SCHEMA.md) for the full fingerprinting algorithm and schema.
 

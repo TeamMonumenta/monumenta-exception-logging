@@ -370,6 +370,8 @@ class ExceptionBot(commands.Bot):
                     first = False
                     await self.edit_exception_message(fingerprint, message_id)
                     self.tracker.clear_has_activity(fingerprint)
+                for msg_id in self.tracker.pop_pending_discord_deletes():
+                    await self.delete_channel_message(msg_id)
             finally:
                 self._refresh_running = False
 
