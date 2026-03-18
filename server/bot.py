@@ -249,6 +249,7 @@ class ExceptionBot(commands.Bot):
         self._register_commands()
         await self.tree.sync()
         self.loop.create_task(self._refresh_loop())
+        self.loop.create_task(self._backfill_missing_messages())
 
     # --- Channel helpers ---
 
@@ -278,6 +279,7 @@ class ExceptionBot(commands.Bot):
             self.tracker.set_discord_message_id(fingerprint, str(message.id))
         except discord.DiscordException:
             logger.exception("Failed to post exception message for %s", fingerprint)
+            return
         await self._notify_subscribers(details)
 
     async def _notify_subscribers(self, details: GroupDetails) -> None:
@@ -352,6 +354,22 @@ class ExceptionBot(commands.Bot):
             logger.warning("Message %s already gone; nothing to delete", message_id)
         except discord.DiscordException:
             logger.exception("Failed to delete message %s", message_id)
+
+    async def _backfill_missing_messages(self) -> None:
+        """On startup, post channel messages for any groups that lack a discord_message_id.
+
+        This covers groups ingested while the bot was offline and groups whose fingerprint
+        changed during the startup migration.
+        """
+        await self.wait_until_ready()
+        fingerprints = self.tracker.get_fingerprints_without_discord_message()
+        if not fingerprints:
+            return
+        logger.info("Backfilling Discord messages for %d untracked group(s)", len(fingerprints))
+        for fingerprint in fingerprints:
+            await self.post_new_exception(fingerprint)
+            await asyncio.sleep(5)
+        logger.info("Backfill complete")
 
     async def _refresh_loop(self) -> None:
         await self.wait_until_ready()

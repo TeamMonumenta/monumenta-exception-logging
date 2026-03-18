@@ -455,6 +455,14 @@ class Tracker:
         ).fetchall()
         return [row['fingerprint'] for row in rows]
 
+    def get_fingerprints_without_discord_message(self) -> list[str]:
+        """Return fingerprints of all groups that have no Discord message ID, newest first."""
+        rows = self._conn.execute(
+            "SELECT fingerprint FROM error_groups WHERE discord_message_id IS NULL "
+            "ORDER BY last_seen DESC"
+        ).fetchall()
+        return [row['fingerprint'] for row in rows]
+
     # --- Fingerprint migration ---
 
     def migrate_fingerprints(self) -> dict[str, Any]:
