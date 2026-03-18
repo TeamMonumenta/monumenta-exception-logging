@@ -203,14 +203,23 @@ def _chunk_lines(lines: list[str], limit: int = _MAX_MSG_LEN) -> list[str]:
     current: list[str] = []
     current_len = 0
     for line in lines:
-        needed = len(line) + (1 if current else 0)
-        if current_len + needed > limit:
-            chunks.append("\n".join(current))
-            current = [line]
-            current_len = len(line)
+        # Split lines that exceed the limit into pieces.
+        # Use [""] for empty lines so they still produce one part.
+        if len(line) <= limit:
+            parts = [line]
         else:
-            current.append(line)
-            current_len += needed
+            parts = []
+            for i in range(0, len(line), limit):
+                parts.append(line[i : i + limit])
+        for part in parts:
+            needed = len(part) + (1 if current else 0)
+            if current_len + needed > limit:
+                chunks.append("\n".join(current))
+                current = [part]
+                current_len = len(part)
+            else:
+                current.append(part)
+                current_len += needed
     if current:
         chunks.append("\n".join(current))
     return chunks if chunks else ["(no results)"]
