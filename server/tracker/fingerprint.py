@@ -15,10 +15,15 @@ _QUOTED_SINGLE_RE = re.compile(r"'[^']{1,64}'")
 _QUOTED_DOUBLE_RE = re.compile(r'"[^"]{1,64}"')
 _BRACKET_DATA_RE = re.compile(r'\[[^\[\]]{0,256}\]')
 _LONG_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{31,}')
+_WORLD_DISTANCE_RE = re.compile(
+    r'(measure distance between )[-_a-z0-9<>]+( and )[-_a-z0-9<>]+',
+    re.IGNORECASE,
+)
 
 
 def normalize_message(message: str) -> str:
-    s = _UUID_RE.sub('<uuid>', message)
+    s = _WORLD_DISTANCE_RE.sub(r'\1<world1>\2<world2>', message)
+    s = _UUID_RE.sub('<uuid>', s)
     s = _BARE_UUID_RE.sub('<uuid>', s)
     s = _IP_RE.sub('<ip>', s)
     s = _LONG_NUM_RE.sub('<N>', s)

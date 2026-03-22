@@ -217,6 +217,20 @@ class TestNormalizeMessage:
                 'ab7cb32502bc45048c6a45ca7f170dad?unsigned=false due to Read timed out')
         assert normalize_message(msg1) == normalize_message(msg2)
 
+    def test_world_distance_normalized(self):
+        msg = 'Cannot measure distance between plot3769 and plot4763'
+        result = normalize_message(msg)
+        assert 'plot3769' not in result
+        assert 'plot4763' not in result
+        assert '<world1>' in result
+        assert '<world2>' in result
+        assert result == 'Cannot measure distance between <world1> and <world2>'
+
+    def test_world_distance_different_worlds_same_normalized(self):
+        msg1 = 'Cannot measure distance between plot3769 and plot4763'
+        msg2 = 'Cannot measure distance between ring101 and plot9999'
+        assert normalize_message(msg1) == normalize_message(msg2)
+
     def test_bad2_pair_same_fingerprint(self):
         # Two CDN/WAF block pages differing only in the opaque correlation ID.
         msg1 = 'request blocked, ref: 20260317T210746Z-r1db49788ddzpxgmhC1YTOzpg800000001fg000000006ta5'
