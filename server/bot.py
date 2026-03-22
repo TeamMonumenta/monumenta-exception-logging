@@ -161,6 +161,7 @@ def _render_fix_prompt(template: str, details: GroupDetails) -> str:
         "short_id": details.fingerprint[:8],
         "exception_class": details.exception_class,
         "message": details.message_template,
+        "raw_message": details.latest_message if details.latest_message is not None else details.message_template,
         "stacktrace": stacktrace,
         "count": str(details.total_count),
         "servers": servers,

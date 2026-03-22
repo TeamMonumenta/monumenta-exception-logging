@@ -8,6 +8,7 @@ HTTP endpoints, and prompt template rendering.
 import asyncio
 import sys
 import os
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -334,7 +335,7 @@ def test_callback_all_terminal_statuses():
 # _render_fix_prompt
 # ===========================================================================
 
-def test_render_substitutes_all_variables(api, fp):
+def test_render_substitutes_core_variables(api, fp):
     details = api.get_group_details(fp)
     assert details is not None
     template = (
@@ -367,3 +368,156 @@ def test_render_curly_braces_in_message_safe():
     rendered = _render_fix_prompt("msg: {message}", details)
     # The normalized message may differ, but the render must not raise
     assert "msg:" in rendered
+
+
+def test_render_substitutes_all_variables_including_raw_message(api, fp):
+    details = api.get_group_details(fp)
+    assert details is not None
+    template = (
+        "{short_id} {exception_class} {message} {raw_message} {stacktrace} "
+        "{count} {servers} {first_seen} {last_seen}"
+    )
+    rendered = _render_fix_prompt(template, details)
+    assert details.fingerprint[:8] in rendered
+    assert details.exception_class in rendered
+    assert str(details.total_count) in rendered
+    assert "{raw_message}" not in rendered
+
+
+def test_render_raw_message_uses_latest_occurrence(api, fp):
+    """When latest_message is set, {raw_message} uses the raw occurrence message."""
+    details = api.get_group_details(fp)
+    assert details is not None
+    assert details.latest_message is not None
+    rendered = _render_fix_prompt("{raw_message}", details)
+    assert rendered == details.latest_message
+
+
+def test_render_raw_message_differs_from_normalized(api, fp):
+    """The raw message should differ from the normalized template for EXAMPLE_EVENT."""
+    details = api.get_group_details(fp)
+    assert details is not None
+    # EXAMPLE_EVENT has entity name and tags that get normalized
+    assert details.latest_message != details.message_template
+
+
+def test_render_raw_message_falls_back_when_no_occurrences():
+    """When no occurrences exist, {raw_message} falls back to message_template."""
+    tracker = Tracker(TrackerConfig(db_path=':memory:'))
+    fp, _ = tracker.ingest_event(parse_event(EXAMPLE_EVENT))
+    # Delete all occurrences to simulate no retained raw messages
+    conn = tracker._conn  # pylint: disable=protected-access
+    conn.execute("DELETE FROM occurrences")
+    conn.commit()
+    details = tracker.get_group_details(fp)
+    assert details is not None
+    assert details.latest_message is None
+    rendered = _render_fix_prompt("{raw_message}", details)
+    assert rendered == details.message_template
+
+
+# ===========================================================================
+# timeout_stale_fix_attempts
+# ===========================================================================
+
+def _backdate_queued_at(api: Tracker, job_id: str, seconds_ago: int) -> None:
+    conn = api._conn  # pylint: disable=protected-access
+    conn.execute(
+        "UPDATE fix_attempts SET queued_at = ? WHERE job_id = ?",
+        (int(time.time()) - seconds_ago, job_id),
+    )
+    conn.commit()
+
+
+def test_timeout_returns_empty_when_no_stale(api, fp):
+    api.queue_fix_attempt(fp, "fix me")
+    # Not backdated — should be fresh
+    assert api.timeout_stale_fix_attempts() == []
+
+
+def test_timeout_marks_stale_pending_as_failure(api, fp):
+    job_id = api.queue_fix_attempt(fp, "fix me")
+    _backdate_queued_at(api, job_id, 7200)
+    timed_out = api.timeout_stale_fix_attempts()
+    assert len(timed_out) == 1
+    assert api.has_active_fix_attempt(fp) is False
+
+
+def test_timeout_marks_stale_running_as_failure(api, fp):
+    job_id = api.queue_fix_attempt(fp, "fix me")
+    api.claim_fix_attempt()  # transitions to 'running'
+    _backdate_queued_at(api, job_id, 7200)
+    timed_out = api.timeout_stale_fix_attempts()
+    assert len(timed_out) == 1
+    assert api.has_active_fix_attempt(fp) is False
+
+
+def test_timeout_ignores_recent_jobs(api, fp, fp2):
+    fresh_id = api.queue_fix_attempt(fp, "fresh")
+    stale_id = api.queue_fix_attempt(fp2, "stale")
+    _backdate_queued_at(api, stale_id, 7200)
+    timed_out = api.timeout_stale_fix_attempts()
+    assert len(timed_out) == 1
+    assert timed_out[0][0] == stale_id
+    # Fresh job still active
+    assert api.has_active_fix_attempt(fp) is True
+    _ = fresh_id  # silence unused-var warning
+
+
+def test_timeout_returns_fingerprint_and_requester(api, fp):
+    job_id = api.queue_fix_attempt(fp, "fix me", requested_by_discord_id="999")
+    _backdate_queued_at(api, job_id, 7200)
+    timed_out = api.timeout_stale_fix_attempts()
+    assert len(timed_out) == 1
+    returned_job_id, returned_fp, returned_requester = timed_out[0]
+    assert returned_job_id == job_id
+    assert returned_fp == fp
+    assert returned_requester == "999"
+
+
+def test_timeout_returns_none_requester_when_not_set(api, fp):
+    job_id = api.queue_fix_attempt(fp, "fix me")
+    _backdate_queued_at(api, job_id, 7200)
+    timed_out = api.timeout_stale_fix_attempts()
+    assert len(timed_out) == 1
+    assert timed_out[0][2] is None
+
+
+def test_timeout_does_not_affect_terminal_jobs(api, fp):
+    job_id = api.queue_fix_attempt(fp, "fix me")
+    api.claim_fix_attempt()
+    api.complete_fix_attempt(job_id, "success", "done", "summary", "detail", None)
+    _backdate_queued_at(api, job_id, 7200)
+    timed_out = api.timeout_stale_fix_attempts()
+    assert timed_out == []
+
+
+# ===========================================================================
+# migrate_fingerprints updates fix_attempts
+# ===========================================================================
+
+def test_migrate_fingerprints_updates_fix_attempts_on_fingerprint_change():
+    """fix_attempts.fingerprint is updated when the group's fingerprint changes."""
+    tracker = Tracker(TrackerConfig(db_path=':memory:'))
+    fp, _ = tracker.ingest_event(parse_event(EXAMPLE_EVENT))
+    job_id = tracker.queue_fix_attempt(fp, "fix me")
+
+    # Corrupt the stored fingerprint so migration will re-compute and update it.
+    conn = tracker._conn  # pylint: disable=protected-access
+    fake_fp = 'a' * 64
+    conn.execute(
+        "UPDATE error_groups SET fingerprint = ? WHERE fingerprint = ?", (fake_fp, fp)
+    )
+    conn.execute(
+        "UPDATE fix_attempts SET fingerprint = ? WHERE fingerprint = ?", (fake_fp, fp)
+    )
+    conn.commit()
+
+    result = tracker.migrate_fingerprints()
+    assert result['updated'] >= 1
+
+    row = conn.execute(
+        "SELECT fingerprint FROM fix_attempts WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    assert row is not None
+    assert row['fingerprint'] == fp  # restored to the correct fingerprint

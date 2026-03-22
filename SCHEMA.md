@@ -23,6 +23,7 @@ CREATE TABLE error_groups (
     status             TEXT NOT NULL DEFAULT 'active'
                            CHECK (status IN ('active', 'muted', 'resolved')),
     discord_message_id TEXT,                       -- Discord channel message ID (null until first posted)
+    has_activity       INTEGER NOT NULL DEFAULT 0, -- 1 when the group has unsent edits; cleared after successful edit
     muted_by           TEXT,                       -- display name of user who muted (null if never muted)
     muted_at           INTEGER,                    -- epoch seconds when muted (null if never muted)
     resolved_by        TEXT,                       -- display name of user who resolved (null if never resolved)
@@ -41,6 +42,7 @@ CREATE INDEX idx_groups_first_seen        ON error_groups(first_seen);
 - `canonical_frames` — JSON array of `{class_name, method, file, line}` objects for the top application frames. These are the frames that were hashed into the fingerprint.
 - `canonical_trace` — complete JSON frame array (all frames) from the very first occurrence. Used to show the full stack in group detail views.
 - `discord_message_id` — ID of the Discord channel message for this group. Set after the bot first posts; cleared (set to null) if the message is deleted externally. Null until a bot is running.
+- `has_activity` — set to `1` whenever new occurrences arrive or the group's status changes; cleared to `0` after the bot successfully edits the Discord message. The refresh loop uses this flag to avoid re-editing messages that have not changed.
 - `muted_by` / `muted_at` — attribution for the most recent mute operation (`display_name` and epoch seconds). Null if the group has never been muted.
 - `resolved_by` / `resolved_at` — attribution for the most recent resolve operation. Null if the group has never been resolved.
 
@@ -153,6 +155,59 @@ CREATE TABLE pending_discord_deletes (
 
 ---
 
+### `fix_attempts`
+
+Records of Chisel automated fix requests. One row per fix attempt, keyed by a UUID generated
+at queue time.
+
+```sql
+CREATE TABLE fix_attempts (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id                   TEXT NOT NULL UNIQUE,          -- UUID generated at queue time; embedded in callback_url
+    fingerprint              TEXT NOT NULL,                 -- links to the exception group (not a FK)
+    status                   TEXT NOT NULL DEFAULT 'pending'
+                             CHECK (status IN ('pending', 'running', 'declined', 'success', 'failure')),
+    rendered_message         TEXT NOT NULL,                 -- rendered fix_exception_prompt.md, stored at queue time
+    requested_by_discord_id  TEXT,                         -- Discord user snowflake who triggered the fix
+    message                  TEXT,                         -- short human-readable status (populated on completion)
+    summary                  TEXT,                         -- full agent narrative (populated on completion)
+    detail                   TEXT,                         -- step-by-step execution log (populated on completion)
+    pr_url                   TEXT,                         -- PR URL; only present on success
+    queued_at                INTEGER NOT NULL,              -- epoch seconds; set on insert
+    started_at               INTEGER,                      -- epoch seconds; set when poll response is claimed
+    completed_at             INTEGER                       -- epoch seconds; set on callback receipt or timeout
+);
+
+CREATE INDEX idx_fix_attempts_fingerprint ON fix_attempts(fingerprint);
+CREATE INDEX idx_fix_attempts_status      ON fix_attempts(status, queued_at);
+```
+
+**Status lifecycle:**
+
+| Status | Description |
+|---|---|
+| `pending` | Queued; waiting for Chisel to poll |
+| `running` | Claimed by Chisel via `POST /chisel/poll`; processing in progress |
+| `declined` | Agent declined the task (wrong package, too complex, etc.) |
+| `success` | Agent created a PR; `pr_url` is populated |
+| `failure` | Agent failed, or the attempt timed out |
+
+**Notes:**
+
+- `fingerprint` is a plain TEXT column, not a foreign key. Fix attempt rows are intentionally
+  not cascade-deleted when the parent error group expires — they accumulate for future
+  `/fix-history` queries.
+- `rendered_message` is the fully rendered prompt template captured at queue time, not at poll
+  time. This is intentional: the state at the moment of the fix request is what Chisel acts on.
+- If the server restarts while a job is `running`, the job remains stuck indefinitely.
+  The hourly expiry task automatically transitions any `pending` or `running` job whose
+  `queued_at` is older than 1 hour to `failure` with `message = 'Timed out: no response received'`.
+- `fingerprint` is updated by the startup fingerprint migration (`migrate_fingerprints`)
+  whenever the parent group's fingerprint changes, so pending/running jobs always refer to the
+  current canonical fingerprint.
+
+---
+
 ## Fingerprinting Algorithm
 
 The fingerprint is computed by the Python ingest service from the raw event. It must be stable across re-occurrences of the same logical bug.
@@ -205,6 +260,21 @@ DELETE FROM error_groups WHERE last_seen < strftime('%s', 'now') - 1209600;
 
 The cascade deletes on `occurrences` and `server_hour_counts` (via `ON DELETE CASCADE`) ensure referential integrity when groups are removed.
 
+The same hourly task also times out stale fix attempts. Any `fix_attempt` row in `pending` or
+`running` status whose `queued_at` is older than 1 hour is transitioned to `failure`:
+
+```sql
+UPDATE fix_attempts
+SET status = 'failure',
+    message = 'Timed out: no response received',
+    completed_at = strftime('%s', 'now')
+WHERE status IN ('pending', 'running')
+  AND queued_at < strftime('%s', 'now') - 3600;
+```
+
+For each timed-out attempt, the bot swaps the `:arrows_counterclockwise:` reaction to `:red_circle:`
+on the associated exception group message and DMs the requester (if one was recorded).
+
 ---
 
 ## Startup Fingerprint Migration
@@ -219,11 +289,13 @@ the current normalization rules. This handles the case where normalization rules
    `message_template` (re-normalized), and `canonical_frames`.
 2. If the new fingerprint equals the stored one, skip (no change).
 3. If no other group has the new fingerprint, update the row in place (`fingerprint` and
-   `message_template` columns only).
+   `message_template` columns only). Also updates `fix_attempts.fingerprint` for any fix
+   attempts that reference the old fingerprint.
 4. If another group already has the new fingerprint (a merge), fold the current group (the
    "loser") into that group (the "winner"):
    - Add counts and extend `first_seen` / `last_seen` on the winner.
    - Re-parent all `occurrences` and merge `server_hour_counts` (upsert).
+   - Remap `fix_attempts.fingerprint` from the loser's fingerprint to the winner's.
    - Queue the loser's `discord_message_id` (if any) in `pending_discord_deletes`.
    - Delete the loser group row.
 

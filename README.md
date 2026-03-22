@@ -224,7 +224,8 @@ The `fix_exception_prompt.md` template supports these variables:
 |---|---|
 | `{short_id}` | 8-character fingerprint prefix |
 | `{exception_class}` | Fully qualified exception class |
-| `{message}` | Normalized exception message |
+| `{message}` | Normalized exception message (variable content replaced with tokens) |
+| `{raw_message}` | Raw exception message from the most recent occurrence (un-normalized; falls back to `{message}` if no occurrences are retained) |
 | `{stacktrace}` | Full canonical stack trace |
 | `{count}` | Total occurrence count |
 | `{servers}` | Comma-separated list of servers affected |

@@ -487,6 +487,15 @@ class Tracker:
 
     # --- Maintenance ---
 
+    def timeout_stale_fix_attempts(
+        self, timeout_seconds: int = 3600
+    ) -> list[tuple[str, str, Optional[str]]]:
+        """Mark pending/running fix attempts older than timeout_seconds as failed.
+
+        Returns list of (job_id, fingerprint, requested_by_discord_id).
+        """
+        return db.timeout_stale_fix_attempts(self._conn, timeout_seconds)
+
     def run_expiry(self) -> dict[str, Any]:
         """Delete occurrences, aggregates, and groups older than expiry_days.
 

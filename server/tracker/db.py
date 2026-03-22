@@ -272,6 +272,10 @@ def migrate_fingerprints(
                     "WHERE id = ?",
                     (new_fp, new_normalized, row['id'])
                 )
+                conn.execute(
+                    "UPDATE fix_attempts SET fingerprint = ? WHERE fingerprint = ?",
+                    (new_fp, row['fingerprint']),
+                )
                 updated += 1
             else:
                 conn.execute(
@@ -313,6 +317,10 @@ def migrate_fingerprints(
                             (row['discord_message_id'],)
                         )
                         orphaned_discord_ids.append(row['discord_message_id'])
+                conn.execute(
+                    "UPDATE fix_attempts SET fingerprint = ? WHERE fingerprint = ?",
+                    (new_fp, row['fingerprint']),
+                )
                 conn.execute("DELETE FROM error_groups WHERE id = ?", (row['id'],))
                 merged += 1
 
@@ -409,6 +417,41 @@ def complete_fix_attempt(
         )
     return str(row["fingerprint"]), (str(row["requested_by_discord_id"])
                                      if row["requested_by_discord_id"] is not None else None)
+
+
+def timeout_stale_fix_attempts(
+    conn: sqlite3.Connection, timeout_seconds: int = 3600
+) -> list[tuple[str, str, Optional[str]]]:
+    """Mark pending/running fix attempts older than timeout_seconds as failed.
+
+    Returns a list of (job_id, fingerprint, requested_by_discord_id) for each
+    attempt that was timed out, so callers can update Discord reactions and DM requesters.
+    """
+    cutoff = int(time.time()) - timeout_seconds
+    now = int(time.time())
+    with conn:
+        rows = conn.execute(
+            "SELECT job_id, fingerprint, requested_by_discord_id FROM fix_attempts "
+            "WHERE status IN ('pending', 'running') AND queued_at < ?",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return []
+        conn.execute(
+            "UPDATE fix_attempts SET status = 'failure', "
+            "message = 'Timed out: no response received', "
+            "completed_at = ? "
+            "WHERE status IN ('pending', 'running') AND queued_at < ?",
+            (now, cutoff),
+        )
+    return [
+        (
+            str(r['job_id']),
+            str(r['fingerprint']),
+            str(r['requested_by_discord_id']) if r['requested_by_discord_id'] is not None else None,
+        )
+        for r in rows
+    ]
 
 
 def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any]:

@@ -123,6 +123,20 @@ async def _expiry_loop(tracker: Tracker, bot: Optional["ExceptionBot"] = None) -
             if bot is not None:
                 for msg_id in result.get("discord_message_ids", []):
                     asyncio.create_task(bot.delete_channel_message(msg_id))
+            timed_out = tracker.timeout_stale_fix_attempts()
+            if timed_out:
+                logger.info('Timed out %d stale fix attempt(s)', len(timed_out))
+                if bot is not None:
+                    for _job_id, fingerprint, requester_discord_id in timed_out:
+                        asyncio.create_task(
+                            bot.on_fix_attempt_completed(
+                                fingerprint, 'failure',
+                                'Timed out: no response received',
+                                '',
+                                None,
+                                requester_discord_id,
+                            )
+                        )
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception('Expiry task failed')
         await asyncio.sleep(3600)

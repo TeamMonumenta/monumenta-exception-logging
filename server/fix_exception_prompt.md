@@ -1,7 +1,7 @@
 Fix the exception below. It has been observed {count} times on server(s): {servers}.
 
 **Message:**
-{message}
+{raw_message}
 
 **Stack trace:**
 {stacktrace}
