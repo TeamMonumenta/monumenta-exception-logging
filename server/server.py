@@ -67,7 +67,6 @@ def create_app(tracker: Tracker, bot: Optional["ExceptionBot"] = None,
 
 async def _expiry_loop(tracker: Tracker, bot: Optional["ExceptionBot"] = None) -> None:
     while True:
-        await asyncio.sleep(3600)
         try:
             result = tracker.run_expiry()
             logger.info('Expiry complete: %s', result)
@@ -76,6 +75,7 @@ async def _expiry_loop(tracker: Tracker, bot: Optional["ExceptionBot"] = None) -
                     asyncio.create_task(bot.delete_channel_message(msg_id))
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception('Expiry task failed')
+        await asyncio.sleep(3600)
 
 
 def _mask_token(token: str) -> str:

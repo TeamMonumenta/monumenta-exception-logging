@@ -208,7 +208,7 @@ def _chunk_lines(lines: list[str], limit: int = _MAX_MSG_LEN) -> list[str]:
         if len(line) <= limit:
             parts = [line]
         else:
-            parts = []
+            parts: list[str] = []
             for i in range(0, len(line), limit):
                 parts.append(line[i : i + limit])
         for part in parts:
@@ -383,9 +383,9 @@ class ExceptionBot(commands.Bot):
     async def _refresh_loop(self) -> None:
         await self.wait_until_ready()
         while True:
-            await asyncio.sleep(self.refresh_period)
             if self._refresh_running:
                 logger.warning("Refresh loop skipping tick: previous run still in progress")
+                await asyncio.sleep(self.refresh_period)
                 continue
             self._refresh_running = True
             try:
@@ -401,6 +401,7 @@ class ExceptionBot(commands.Bot):
                     await self.delete_channel_message(msg_id)
             finally:
                 self._refresh_running = False
+            await asyncio.sleep(self.refresh_period)
 
     # --- Reaction handlers ---
 
