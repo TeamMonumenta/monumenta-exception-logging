@@ -85,6 +85,28 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS pending_discord_deletes (
             message_id TEXT PRIMARY KEY
         );
+
+        CREATE TABLE IF NOT EXISTS fix_attempts (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id                   TEXT NOT NULL UNIQUE,
+            fingerprint              TEXT NOT NULL,
+            status                   TEXT NOT NULL DEFAULT 'pending'
+                                     CHECK (status IN ('pending', 'running', 'declined', 'success', 'failure')),
+            rendered_message         TEXT NOT NULL,
+            requested_by_discord_id  TEXT,
+            message                  TEXT,
+            summary                  TEXT,
+            detail                   TEXT,
+            pr_url                   TEXT,
+            queued_at                INTEGER NOT NULL,
+            started_at               INTEGER,
+            completed_at             INTEGER
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_fix_attempts_fingerprint
+            ON fix_attempts(fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_fix_attempts_status
+            ON fix_attempts(status, queued_at);
     """)
     conn.commit()
 
@@ -310,6 +332,83 @@ def pop_pending_discord_deletes(conn: sqlite3.Connection) -> list[str]:
         rows = conn.execute("SELECT message_id FROM pending_discord_deletes").fetchall()
         conn.execute("DELETE FROM pending_discord_deletes")
     return [row['message_id'] for row in rows]
+
+
+def insert_fix_attempt(
+    conn: sqlite3.Connection,
+    job_id: str,
+    fingerprint: str,
+    rendered_message: str,
+    queued_at: int,
+    requested_by_discord_id: Optional[str] = None,
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO fix_attempts "
+            "(job_id, fingerprint, rendered_message, queued_at, requested_by_discord_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (job_id, fingerprint, rendered_message, queued_at, requested_by_discord_id),
+        )
+
+
+def has_active_fix_attempt(conn: sqlite3.Connection, fingerprint: str) -> bool:
+    """Return True if any pending or running fix attempt exists for this fingerprint."""
+    row = conn.execute(
+        "SELECT 1 FROM fix_attempts WHERE fingerprint = ? "
+        "AND status IN ('pending', 'running') LIMIT 1",
+        (fingerprint,),
+    ).fetchone()
+    return row is not None
+
+
+def claim_fix_attempt(conn: sqlite3.Connection) -> Optional[sqlite3.Row]:
+    """Atomically claim the oldest pending fix attempt.
+
+    Marks it as 'running' and returns its row, or None if the queue is empty.
+    """
+    now = int(time.time())
+    with conn:
+        row = conn.execute(
+            "SELECT id, job_id, fingerprint, rendered_message FROM fix_attempts "
+            "WHERE status = 'pending' ORDER BY queued_at ASC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE fix_attempts SET status = 'running', started_at = ? WHERE id = ?",
+            (now, row["id"]),
+        )
+    return row
+
+
+def complete_fix_attempt(
+    conn: sqlite3.Connection,
+    job_id: str,
+    status: str,
+    message: str,
+    summary: str,
+    detail: str,
+    pr_url: Optional[str],
+    completed_at: int,
+) -> Optional[tuple[str, Optional[str]]]:
+    """Record the result of a fix attempt.
+
+    Returns (fingerprint, requested_by_discord_id), or None if the job_id is unknown.
+    """
+    with conn:
+        row = conn.execute(
+            "SELECT fingerprint, requested_by_discord_id FROM fix_attempts WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE fix_attempts SET status = ?, message = ?, summary = ?, detail = ?, "
+            "pr_url = ?, completed_at = ? WHERE job_id = ?",
+            (status, message, summary, detail, pr_url, completed_at, job_id),
+        )
+    return str(row["fingerprint"]), (str(row["requested_by_discord_id"])
+                                     if row["requested_by_discord_id"] is not None else None)
 
 
 def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any]:

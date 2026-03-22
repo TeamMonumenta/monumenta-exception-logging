@@ -16,6 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from tracker.api import FrameSummary, GroupDetails, GroupSummary, Tracker
+from tracker.config import TrackerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,32 @@ def _matches_notify(pattern: str, details: GroupDetails) -> bool:
     )
 
 
+def _render_fix_prompt(template: str, details: GroupDetails) -> str:
+    """Substitute template variables with exception group data.
+
+    Uses regex substitution rather than str.format() so that curly braces in
+    exception messages and stack traces do not cause KeyError or IndexError.
+    Unknown variables (not in the substitution map) are left as-is.
+    """
+    stacktrace = "\n".join(_fmt_frame(f) for f in details.canonical_trace)
+    servers = ", ".join(sorted(details.servers_affected)) if details.servers_affected else "none"
+    subs: dict[str, str] = {
+        "short_id": details.fingerprint[:8],
+        "exception_class": details.exception_class,
+        "message": details.message_template,
+        "stacktrace": stacktrace,
+        "count": str(details.total_count),
+        "servers": servers,
+        "first_seen": details.first_seen.isoformat(),
+        "last_seen": details.last_seen.isoformat(),
+    }
+
+    def _replace(m: re.Match[str]) -> str:
+        return subs.get(m.group(1), m.group(0))
+
+    return re.sub(r"\{(\w+)\}", _replace, template)
+
+
 # ---------------------------------------------------------------------------
 # Summary list formatting (for slash command responses)
 # ---------------------------------------------------------------------------
@@ -245,7 +272,8 @@ class ExceptionBot(commands.Bot):
     """Discord bot that tracks Monumenta exception groups."""
 
     def __init__(self, tracker: Tracker, channel_id: int, refresh_period: int,
-                 slash_command_prefix: str = ""):
+                 slash_command_prefix: str = "",
+                 config: Optional[TrackerConfig] = None):
         intents = discord.Intents.default()
         super().__init__(command_prefix="!", intents=intents)
         self.tracker = tracker
@@ -253,6 +281,14 @@ class ExceptionBot(commands.Bot):
         self.refresh_period = refresh_period
         self.slash_command_prefix = slash_command_prefix
         self._refresh_running = False
+        cfg = config or TrackerConfig()
+        self._chisel_public_url: Optional[str] = cfg.chisel_public_url
+        self._chisel_fix_prompt_path: str = cfg.chisel_fix_prompt_path
+        self._reaction_fix_request: str = cfg.reaction_fix_request
+        self._reaction_fix_working: str = cfg.reaction_fix_working
+        self._reaction_fix_success: str = cfg.reaction_fix_success
+        self._reaction_fix_failure: str = cfg.reaction_fix_failure
+        self._reaction_fix_declined: str = cfg.reaction_fix_declined
 
     async def setup_hook(self) -> None:
         self._register_commands()
@@ -406,21 +442,26 @@ class ExceptionBot(commands.Bot):
     # --- Reaction handlers ---
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        """Mute, resolve, or show details based on the reaction emoji."""
+        """Mute, resolve, show details, or queue a fix based on the reaction emoji."""
         if payload.channel_id != self.channel_id:
             return
         if self.user and payload.user_id == self.user.id:
             return
-        if payload.emoji.name not in (_EMOJI_MUTE, _EMOJI_RESOLVE, _EMOJI_QUESTION):
+        emoji = payload.emoji.name
+        known = (_EMOJI_MUTE, _EMOJI_RESOLVE, _EMOJI_QUESTION, self._reaction_fix_request)
+        if emoji not in known:
             return
         fingerprint = self.tracker.get_fingerprint_by_discord_message_id(str(payload.message_id))
         if fingerprint is None:
             return
-        if payload.emoji.name == _EMOJI_QUESTION:
+        if emoji == self._reaction_fix_request:
+            await self._handle_fix_request_reaction(payload, fingerprint)
+            return
+        if emoji == _EMOJI_QUESTION:
             await self._handle_question_reaction(payload, fingerprint)
             return
         actor = payload.member.display_name if payload.member else str(payload.user_id)
-        if payload.emoji.name == _EMOJI_MUTE:
+        if emoji == _EMOJI_MUTE:
             ok = self.tracker.mute_group(fingerprint, actor=actor)
             action = "muted"
         else:
@@ -474,6 +515,163 @@ class ExceptionBot(commands.Bot):
             logger.exception(
                 "Failed to remove :question: reaction on message %d", payload.message_id
             )
+
+    async def _handle_fix_request_reaction(
+        self, payload: discord.RawReactionActionEvent, fingerprint: str
+    ) -> None:
+        """Queue a Chisel fix attempt and swap the trigger reaction to the working emoji.
+
+        The wrench reaction is always removed regardless of whether the job is accepted,
+        so it cannot linger on the message after a bot restart.
+        """
+        if not self._chisel_public_url:
+            return
+
+        job_queued = False
+        if self.tracker.has_active_fix_attempt(fingerprint):
+            logger.info(
+                "Fix request ignored: active fix attempt already exists for %s",
+                fingerprint[:8],
+            )
+        else:
+            try:
+                with open(self._chisel_fix_prompt_path, encoding="utf-8") as fh:
+                    template = fh.read()
+            except OSError:
+                logger.error(
+                    "Could not read fix prompt template: %s", self._chisel_fix_prompt_path
+                )
+            else:
+                details = self.tracker.get_group_details(fingerprint)
+                if details is not None:
+                    rendered = _render_fix_prompt(template, details)
+                    job_id = self.tracker.queue_fix_attempt(
+                        fingerprint, rendered, str(payload.user_id)
+                    )
+                    logger.info(
+                        "Fix attempt queued: job %s for group %s by user %d",
+                        job_id, fingerprint[:8], payload.user_id,
+                    )
+                    job_queued = True
+
+        # Always remove the wrench reaction so it cannot linger after a restart.
+        channel = await self._get_channel()
+        if channel is None:
+            return
+        try:
+            message = await channel.fetch_message(payload.message_id)
+            react_user: Optional[discord.User | discord.Member] = None
+            if payload.member is not None:
+                react_user = payload.member
+            else:
+                try:
+                    react_user = await self.fetch_user(payload.user_id)
+                except discord.DiscordException:
+                    logger.warning(
+                        "Could not fetch user %d to remove fix reaction", payload.user_id
+                    )
+            if react_user is not None:
+                try:
+                    await message.remove_reaction(self._reaction_fix_request, react_user)
+                except discord.Forbidden:
+                    logger.warning(
+                        "No permission to remove fix reaction on message %d",
+                        payload.message_id,
+                    )
+                except discord.DiscordException:
+                    logger.exception(
+                        "Failed to remove fix reaction on message %d", payload.message_id
+                    )
+            if job_queued:
+                await message.add_reaction(self._reaction_fix_working)
+        except discord.DiscordException:
+            logger.exception(
+                "Failed to update reactions for fix request on message %d", payload.message_id
+            )
+
+    async def on_fix_attempt_completed(
+        self,
+        fingerprint: str,
+        status: str,
+        message: str,
+        summary: str,
+        pr_url: Optional[str] = None,
+        requester_discord_id: Optional[str] = None,
+    ) -> None:
+        """Swap the working reaction to an outcome emoji and DM the requester."""
+        msg_pairs = self.tracker.get_all_discord_messages()
+        message_id: Optional[str] = None
+        for fp, mid in msg_pairs:
+            if fp == fingerprint:
+                message_id = mid
+                break
+        if message_id is None:
+            logger.warning(
+                "No Discord message found for fingerprint %s on fix completion", fingerprint[:8]
+            )
+        outcome = {
+            "success": self._reaction_fix_success,
+            "failure": self._reaction_fix_failure,
+            "declined": self._reaction_fix_declined,
+        }.get(status, self._reaction_fix_failure)
+
+        if message_id is not None:
+            channel = await self._get_channel()
+            if channel is not None:
+                try:
+                    chan_message = await channel.fetch_message(int(message_id))
+                    if self.user is not None:
+                        try:
+                            await chan_message.remove_reaction(self._reaction_fix_working, self.user)
+                        except (discord.NotFound, discord.HTTPException):
+                            pass  # reaction may already be gone
+                    await chan_message.add_reaction(outcome)
+                except discord.DiscordException:
+                    logger.exception(
+                        "Failed to update reactions for fix completion on group %s",
+                        fingerprint[:8],
+                    )
+
+        if pr_url:
+            logger.info("Fix completed for group %s: %s - %s", fingerprint[:8], status, pr_url)
+        else:
+            logger.info("Fix completed for group %s: %s", fingerprint[:8], status)
+
+        if requester_discord_id is not None:
+            await self._dm_fix_result(
+                requester_discord_id, fingerprint, status, message, summary, pr_url
+            )
+
+    async def _dm_fix_result(
+        self,
+        discord_user_id: str,
+        fingerprint: str,
+        status: str,
+        message: str,
+        summary: str,
+        pr_url: Optional[str],
+    ) -> None:
+        """DM the user who requested a fix with the outcome."""
+        fp8 = fingerprint[:8]
+        status_line = f"Fix attempt **{status}** for exception `{fp8}`"
+        lines = [status_line]
+        if message:
+            lines.append(f"**Result:** {message}")
+        if pr_url:
+            lines.append(f"**PR:** {pr_url}")
+        if summary:
+            lines.append(f"**Summary:** {summary}")
+        try:
+            user = await self.fetch_user(int(discord_user_id))
+            for chunk in _chunk_lines(lines):
+                await user.send(chunk)
+            logger.info("DMed fix result for group %s to user %s", fp8, discord_user_id)
+        except discord.NotFound:
+            logger.warning("Could not find user %s to DM fix result", discord_user_id)
+        except discord.Forbidden:
+            logger.warning("Could not DM user %s for fix result (DMs disabled)", discord_user_id)
+        except discord.DiscordException:
+            logger.exception("Failed to DM fix result to user %s", discord_user_id)
 
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
         """Unmute a group when :no_entry: or :white_check_mark: is removed."""

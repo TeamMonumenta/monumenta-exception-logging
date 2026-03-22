@@ -11,6 +11,7 @@ should wrap calls with asyncio.get_event_loop().run_in_executor(None, func).
 import json
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -41,6 +42,13 @@ class GroupSummary:
     total_count: int
     recent_count: int               # occurrences within the queried time window
     server_counts: dict[str, int]   # server_id -> count within the queried time window
+
+
+@dataclass
+class FixAttemptJob:
+    job_id: str
+    fingerprint: str
+    rendered_message: str
 
 
 @dataclass
@@ -487,3 +495,54 @@ class Tracker:
         Returns row counts plus discord_message_ids for groups that had tracked messages.
         """
         return db.run_expiry(self._conn, self._config.expiry_days)
+
+    # --- Chisel fix attempts ---
+
+    def queue_fix_attempt(
+        self,
+        fingerprint: str,
+        rendered_message: str,
+        requested_by_discord_id: Optional[str] = None,
+    ) -> str:
+        """Queue a new fix attempt for the given group. Returns the new job_id (UUID)."""
+        job_id = str(uuid.uuid4())
+        db.insert_fix_attempt(
+            self._conn, job_id, fingerprint, rendered_message,
+            int(time.time()), requested_by_discord_id,
+        )
+        return job_id
+
+    def has_active_fix_attempt(self, fingerprint: str) -> bool:
+        """Return True if a pending or running fix attempt exists for this fingerprint."""
+        return db.has_active_fix_attempt(self._conn, fingerprint)
+
+    def claim_fix_attempt(self) -> Optional[FixAttemptJob]:
+        """Atomically claim the oldest pending fix attempt.
+
+        Marks it as 'running' and returns its data, or None if the queue is empty.
+        """
+        row = db.claim_fix_attempt(self._conn)
+        if row is None:
+            return None
+        return FixAttemptJob(
+            job_id=str(row["job_id"]),
+            fingerprint=str(row["fingerprint"]),
+            rendered_message=str(row["rendered_message"]),
+        )
+
+    def complete_fix_attempt(
+        self,
+        job_id: str,
+        status: str,
+        message: str,
+        summary: str,
+        detail: str,
+        pr_url: Optional[str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """Record the result of a fix attempt.
+
+        Returns (fingerprint, requested_by_discord_id), or None if the job_id is unknown.
+        """
+        return db.complete_fix_attempt(
+            self._conn, job_id, status, message, summary, detail, pr_url, int(time.time())
+        )

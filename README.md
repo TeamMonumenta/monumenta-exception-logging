@@ -1,6 +1,6 @@
 # Monumenta Exception Logger
 
-Custom exception tracker used by the the Monumenta Minecraft network.
+Custom exception tracker used by the Monumenta Minecraft network.
 Aggregates and fingerprints exceptions from all servers into a central SQLite
 database, with Discord integration for alerts and triage.
 
@@ -18,7 +18,7 @@ ERROR-level log event with a throwable, the appender:
 - POSTs to the ingest server asynchronously (fire-and-forget, 20 events/sec rate limit)
 
 The appender is attached programmatically at plugin startup via `LoggerContext` and removed on
-disable. It uses Java's built-in `java.net.http.HttpClient` — no external HTTP library is needed.
+disable. It uses Java's built-in `java.net.http.HttpClient` (no external HTTP library needed).
 Gson (available on Paper's classpath) handles JSON serialization.
 
 The plugin is configured via environment variables for simplicity in a docker/kubernetes environment:
@@ -65,7 +65,14 @@ The server is configured via environment variables:
 | `DISCORD_TOKEN` | Discord bot token; if unset, the bot is disabled |
 | `DISCORD_CHANNEL` | Discord channel ID (integer) |
 | `DISCORD_REFRESH_PERIOD_SECONDS` | Refresh loop interval in seconds (default: `300`) |
-| `SLASH_COMMAND_PREFIX` | Prefix prepended to all slash command names (default: empty). Use to run multiple bots in one Discord — e.g. `ex_play_` makes `/new` become `/ex_play_new`. |
+| `SLASH_COMMAND_PREFIX` | Prefix prepended to all slash command names (default: empty). Use to run multiple bots in one Discord - e.g. `ex_play_` makes `/new` become `/ex_play_new`. |
+| `CHISEL_PUBLIC_URL` | Base URL of this server's public endpoint (e.g. `https://exceptions.example.com`). When set, enables the Chisel integration: the `/chisel/poll` and `/chisel/callback/*` endpoints become active and the 🔧 reaction handler is enabled. |
+| `CHISEL_FIX_PROMPT_PATH` | Path to the `fix_exception_prompt.md` template rendered when a fix is requested (default: `fix_exception_prompt.md`). |
+| `REACTION_FIX_REQUEST` | Emoji that triggers a Chisel fix request (default: 🔧). |
+| `REACTION_FIX_WORKING` | Emoji shown while a fix is in progress (default: 🔄). |
+| `REACTION_FIX_SUCCESS` | Emoji shown when Chisel opens a PR (default: 🟢). |
+| `REACTION_FIX_FAILURE` | Emoji shown when Chisel fails (default: 🔴). |
+| `REACTION_FIX_DECLINED` | Emoji shown when Chisel declines the task (default: 🟡). |
 
 ## Architecture
 
@@ -83,10 +90,10 @@ bug always groups together:
 | Hyphenated UUID | `<uuid>` | `550e8400-e29b-41d4-a716-446655440000` |
 | Bare (unhyphenated) UUID | `<uuid>` | `3601df3d96f54dc1b10b8a4ebcefd210` (Mojang auth URLs) |
 | IP address | `<ip>` | `192.168.1.100` |
-| Long number (≥ 4 digits) | `<N>` | coordinates, entity IDs, task IDs |
+| Long number (>= 4 digits) | `<N>` | coordinates, entity IDs, task IDs |
 | Quoted string (single or double) | `<str>` | entity names, class names in NPE messages |
 | Bracket data | `<data>` | boss tag lists, NBT |
-| Long opaque token (≥ 32 `[A-Za-z0-9_-]` chars) | `<id>` | CDN/WAF request IDs, auth tokens, hashes |
+| Long opaque token (>= 32 `[A-Za-z0-9_-]` chars) | `<id>` | CDN/WAF request IDs, auth tokens, hashes |
 | World names after "measure distance between ... and ..." | `<world1>`, `<world2>` | `plot3769`, `ringinstance101` |
 
 At startup the server automatically re-fingerprints all existing groups using the current
@@ -99,7 +106,7 @@ See [SCHEMA.md](SCHEMA.md) for the full fingerprinting algorithm and schema.
 
 ### Status model
 
-Groups have three statuses: `active`, `muted`, `resolved`. **Status is never changed by ingest** —
+Groups have three statuses: `active`, `muted`, `resolved`. **Status is never changed by ingest** -
 active, muted, and resolved groups all receive count and `last_seen` updates on reoccurrence. Status
 is only changed by explicit slash commands (`/mute`, `/unmute`, `/resolve`). Resolved groups age
 out naturally after the retention window expires (see `EXPIRY_DAYS`).
@@ -125,14 +132,14 @@ Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names a
 | `/new` | `[hours=24]` | Groups first seen in the last N hours |
 | `/search` | `query` | Search by exception class, message text, or stack frame (e.g. `ParticleManager.java`) |
 | `/server` | `name` | Top groups for a specific server |
-| `/muted` | — | List muted groups |
-| `/resolved` | — | List resolved groups |
+| `/muted` | - | List muted groups |
+| `/resolved` | - | List resolved groups |
 | `/details` | `short_id` | Full details with stack trace and timeline |
 | `/mute` | `short_id` | Mute a group |
 | `/unmute` | `short_id` | Unmute a group |
 | `/resolve` | `short_id` | Mark a group resolved |
 | `/notify add` | `pattern` | Add a personal notification rule (Python regex) |
-| `/notify list` | — | List your notification rules with their IDs |
+| `/notify list` | - | List your notification rules with their IDs |
 | `/notify remove` | `id` | Remove a notification rule by ID |
 | `/notify test` | `id` | Test a rule against all active groups (sends up to 5 DMs) |
 
@@ -161,11 +168,68 @@ triage actions:
 | Add `:white_check_mark:` | Resolve the group (equivalent to `/resolve`) |
 | Remove `:no_entry:` or `:white_check_mark:` | Unmute the group (equivalent to `/unmute`) |
 | Add `:question:` | Receive a DM with full group details (equivalent to `/details`) |
+| Add `:wrench:` | Submit a Chisel fix request (requires `CHISEL_PUBLIC_URL` to be set) |
 
 Removing either mute or resolve reaction always unmutes, regardless of whether other reactions of
-that type remain — making it easy to unmute an issue someone else muted. For `:question:`, the bot
+that type remain - making it easy to unmute an issue someone else muted. For `:question:`, the bot
 attempts to remove the reaction after sending the DM; this requires the **Manage Messages**
 permission and is skipped with a warning logged if not granted.
+
+### Chisel integration (automated fix requests)
+
+When `CHISEL_PUBLIC_URL` is set, the server exposes two additional endpoints consumed by the
+[Chisel](https://github.com/Combustible/discord-autopatch-chisel) service. When configured
+and triggered on a specific exception via the discord channel, this integration will attempt
+to automatically fix that exception and open a pull request.
+
+| Endpoint | Description |
+|---|---|
+| `POST /chisel/poll` | Chisel polls this to claim the next pending fix job. Returns 200 with `{message, requester_id, callback_url}` or 204 if the queue is empty. Authentication is handled at the Kubernetes ingress layer - see the deployment docs. |
+| `POST /chisel/callback/<job_id>` | Chisel POSTs the job result here on completion. Updates the fix attempt record, swaps the Discord reaction to the outcome emoji, and DMs the user who requested the fix. |
+
+**Callback request body** (POSTed by Chisel to `/chisel/callback/<job_id>`):
+
+```json
+{
+  "status": "success" | "failure" | "declined",
+  "message": "Short human-readable status (<= 200 chars)",
+  "summary": "Full agent narrative: what was examined, what changed or why not",
+  "detail": "Step-by-step execution log: every file examined, search run, decision made",
+  "pr_url": "https://github.com/..."
+}
+```
+
+`pr_url` is only present when `status = "success"`. All other fields are always present.
+`detail` is stored in the `fix_attempts` table but not included in the DM to the requester.
+
+The fix request workflow:
+
+1. A developer adds `:wrench:` to an exception group's Discord message
+2. The bot renders `fix_exception_prompt.md` with exception data, queues a fix attempt in the
+   `fix_attempts` table (recording the requester's Discord user ID), removes `:wrench:`, and
+   adds `:arrows_counterclockwise:`. The wrench reaction is always removed regardless of outcome
+   so it cannot linger on messages across bot restarts.
+3. Chisel polls, claims the job, and attempts to create a pull request fixing the exception
+4. On completion, Chisel POSTs the result; the bot swaps `:arrows_counterclockwise:` to the
+   outcome emoji (🟢 success / 🔴 failure / 🟡 declined) and DMs the requester with the
+   status, message, summary, and PR URL if applicable
+
+If a fix attempt is already pending or running for a group, a second `:wrench:` reaction is
+silently ignored (the wrench is still removed). Fix attempt history is stored in the
+`fix_attempts` table for future `/fix-history` commands.
+
+The `fix_exception_prompt.md` template supports these variables:
+
+| Variable | Value |
+|---|---|
+| `{short_id}` | 8-character fingerprint prefix |
+| `{exception_class}` | Fully qualified exception class |
+| `{message}` | Normalized exception message |
+| `{stacktrace}` | Full canonical stack trace |
+| `{count}` | Total occurrence count |
+| `{servers}` | Comma-separated list of servers affected |
+| `{first_seen}` | ISO timestamp of first occurrence |
+| `{last_seen}` | ISO timestamp of most recent occurrence |
 
 ### Async model
 
@@ -175,7 +239,7 @@ writes complete fast enough not to block the event loop meaningfully.
 
 ### Security
 
-No authentication. Plain HTTP only. You must ensure that the server is properly firewalled. 
+No authentication. Plain HTTP only. You must ensure that the server is properly firewalled.
 
 ## Development
 
@@ -187,7 +251,7 @@ cd server
 # Create .venv and install runtime + dev dependencies
 make venv
 
-# Run all checks (pylint → pyright → pytest); stops at first failure
+# Run all checks (pylint -> pyright -> pytest); stops at first failure
 make test
 
 # Individual targets
@@ -213,5 +277,5 @@ cd plugin && ./gradlew clean build
 
 ## Reference
 
-- [PROTOCOL.md](PROTOCOL.md) — JSON wire format (plugin → server)
-- [SCHEMA.md](SCHEMA.md) — SQLite schema and fingerprinting algorithm
+- [PROTOCOL.md](PROTOCOL.md) - JSON wire format (plugin -> server)
+- [SCHEMA.md](SCHEMA.md) - SQLite schema and fingerprinting algorithm

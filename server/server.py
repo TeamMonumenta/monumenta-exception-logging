@@ -38,8 +38,12 @@ def _format_verbose_event(event: IngestEvent, fingerprint: str, is_new: bool) ->
     return "\n".join(lines)
 
 
-def create_app(tracker: Tracker, bot: Optional["ExceptionBot"] = None,
-               verbose: bool = True) -> Quart:
+def create_app(
+    tracker: Tracker,
+    bot: Optional["ExceptionBot"] = None,
+    verbose: bool = True,
+    chisel_public_url: Optional[str] = None,
+) -> Quart:
     app = Quart(__name__)
 
     @app.post('/ingest')
@@ -57,6 +61,52 @@ def create_app(tracker: Tracker, bot: Optional["ExceptionBot"] = None,
         if is_new and bot is not None:
             asyncio.create_task(bot.post_new_exception(fingerprint))
         return '', 204
+
+    @app.post('/chisel/poll')
+    async def chisel_poll():
+        if not chisel_public_url:
+            return jsonify({'error': 'chisel integration not configured'}), 503
+        job = tracker.claim_fix_attempt()
+        if job is None:
+            return '', 204
+        return jsonify({
+            'message': job.rendered_message,
+            'requester_id': job.fingerprint[:8],
+            'callback_url': f'{chisel_public_url}/chisel/callback/{job.job_id}',
+        })
+
+    @app.post('/chisel/callback/<job_id>')
+    async def chisel_callback(job_id: str):
+        if not chisel_public_url:
+            return jsonify({'error': 'chisel integration not configured'}), 503
+        raw = await request.get_json(force=True)
+        if raw is None:
+            return jsonify({'error': 'expected JSON body'}), 400
+        status = raw.get('status')
+        if status not in ('success', 'failure', 'declined'):
+            return jsonify({'error': 'status must be success, failure, or declined'}), 400
+        result = tracker.complete_fix_attempt(
+            job_id,
+            status=str(status),
+            message=str(raw.get('message', '')),
+            summary=str(raw.get('summary', '')),
+            detail=str(raw.get('detail', '')),
+            pr_url=raw.get('pr_url') or None,
+        )
+        if result is None:
+            return jsonify({'error': 'unknown job_id'}), 404
+        fingerprint, requester_discord_id = result
+        if bot is not None:
+            asyncio.create_task(
+                bot.on_fix_attempt_completed(
+                    fingerprint, str(status),
+                    str(raw.get('message', '')),
+                    str(raw.get('summary', '')),
+                    raw.get('pr_url'),
+                    requester_discord_id,
+                )
+            )
+        return jsonify({'ok': True})
 
     @app.before_serving
     async def startup():
@@ -130,7 +180,8 @@ async def main():
         "  DISCORD_TOKEN=%s\n"
         "  DISCORD_CHANNEL=%s\n"
         "  DISCORD_REFRESH_PERIOD_SECONDS=%s\n"
-        "  SLASH_COMMAND_PREFIX=%s",
+        "  SLASH_COMMAND_PREFIX=%s\n"
+        "  CHISEL_PUBLIC_URL=%s",
         config.db_path,
         ','.join(config.app_packages),
         config.expiry_days,
@@ -140,6 +191,7 @@ async def main():
         channel_id if discord_token else '(not set)',
         refresh_period if discord_token else '(not set)',
         repr(slash_command_prefix) if discord_token else '(not set)',
+        config.chisel_public_url or '(not set)',
     )
 
     tracker = Tracker(config)
@@ -156,8 +208,8 @@ async def main():
     bot: Optional["ExceptionBot"] = None
     if discord_token:
         from bot import ExceptionBot  # pylint: disable=import-outside-toplevel
-        bot = ExceptionBot(tracker, channel_id, refresh_period, slash_command_prefix)
-    app = create_app(tracker, bot, verbose=config.verbose)
+        bot = ExceptionBot(tracker, channel_id, refresh_period, slash_command_prefix, config)
+    app = create_app(tracker, bot, verbose=config.verbose, chisel_public_url=config.chisel_public_url)
 
     try:
         await _run_until_stopped(app, port, bot, discord_token, stop)
