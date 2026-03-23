@@ -616,9 +616,13 @@ class ExceptionBot(commands.Bot):
             "declined": self._reaction_fix_declined,
         }.get(status, self._reaction_fix_failure)
 
+        discord_message_url: Optional[str] = None
         if message_id is not None:
             channel = await self._get_channel()
             if channel is not None:
+                discord_message_url = (
+                    f"https://discord.com/channels/{channel.guild.id}/{channel.id}/{message_id}"
+                )
                 try:
                     chan_message = await channel.fetch_message(int(message_id))
                     if self.user is not None:
@@ -640,7 +644,8 @@ class ExceptionBot(commands.Bot):
 
         if requester_discord_id is not None:
             await self._dm_fix_result(
-                requester_discord_id, fingerprint, status, message, summary, pr_url
+                requester_discord_id, fingerprint, status, message, summary, pr_url,
+                discord_message_url,
             )
 
     async def _dm_fix_result(
@@ -651,11 +656,14 @@ class ExceptionBot(commands.Bot):
         message: str,
         summary: str,
         pr_url: Optional[str],
+        discord_message_url: Optional[str] = None,
     ) -> None:
         """DM the user who requested a fix with the outcome."""
         fp8 = fingerprint[:8]
         status_line = f"Fix attempt **{status}** for exception `{fp8}`"
         lines = [status_line]
+        if discord_message_url:
+            lines.append(f"**Exception:** {discord_message_url}")
         if message:
             lines.append(f"**Result:** {message}")
         if pr_url:
