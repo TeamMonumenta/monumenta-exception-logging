@@ -6,7 +6,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tracker/ tracker/
-COPY server.py bot.py ./
+COPY fix_exception_prompt.md server.py bot.py ./
 
 EXPOSE 8080
 
