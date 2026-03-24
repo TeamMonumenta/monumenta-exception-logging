@@ -1,0 +1,139 @@
+# NOTE:
+# To generate the maps-auth secret, run these commands:
+# htpasswd -c ./auth chisel
+# kubectl create secret generic chisel --from-file auth -n play
+# rm auth
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: exception-logger
+  namespace: play
+  annotations:
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: chisel
+    nginx.ingress.kubernetes.io/auth-realm: "Authentication Required - ok"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - exception-logger-play.playmonumenta.com
+  rules:
+  - host: exception-logger-play.playmonumenta.com
+    http:
+      paths:
+        - pathType: Prefix
+          path: "/"
+          backend:
+            service:
+              name: exception-logger
+              port:
+                number: 80
+
+---
+
+# Ingest endpoint for Minecraft servers
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: exception-logger
+  namespace: play
+spec:
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: exception-logger
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exception-logger
+  namespace: play
+  labels:
+    app: exception-logger
+spec:
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exception-logger
+  template:
+    metadata:
+      labels:
+        app: exception-logger
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - monumenta-18
+      volumes:
+        - name: exception-logger-storage
+          hostPath:
+            type: Directory
+            path: /nfs/exception-logger/play
+      containers:
+      - name: exception-logger
+        image: ghcr.io/teammonumenta/monumenta-automation/monumenta-exception-logger:latest
+        tty: false
+        stdin: false
+        volumeMounts:
+        - name: exception-logger-storage
+          mountPath: /data
+        env:
+        - name: DB_PATH
+          value: /data/tracker.db
+        # Comma-separated Java package prefixes used during fingerprinting.
+        # Frames outside these packages are treated as library frames.
+        - name: APP_PACKAGES
+          value: com.playmonumenta
+        - name: EXPIRY_DAYS
+          value: "14"
+        - name: PORT
+          value: "8080"
+        # Log a formatted entry to stdout for every ingest submission.
+        - name: VERBOSE
+          value: "false"
+        - name: DISCORD_CHANNEL
+          value: "1477057185820180664"
+        # How often (seconds) the bot re-edits all tracked channel messages.
+        - name: DISCORD_REFRESH_PERIOD_SECONDS
+          value: "300"
+        - name: SLASH_COMMAND_PREFIX
+          value: "ex_play_"
+        - name: CHISEL_PUBLIC_URL
+          value: "https://exception-logger-play.playmonumenta.com"
+        - name: CHISEL_ALLOWED_USERS
+          value: "302298391969267712"
+        - name: REACTION_FIX_WORKING
+          value: ""
+        - name: REACTION_FIX_SUCCESS
+          value: ""
+        - name: REACTION_FIX_FAILURE
+          value: ""
+        - name: REACTION_FIX_DECLINED
+          value: ""
+        # Bot token loaded from a Kubernetes secret.
+        # Create the secret with:
+        #   kubectl create secret generic exception-logger --from-literal=discord-token='YOUR_TOKEN_HERE' -n <namespace>
+        - name: DISCORD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: exception-logger
+              key: discord-token
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi

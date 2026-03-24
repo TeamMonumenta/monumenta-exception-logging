@@ -1,0 +1,93 @@
+# Ingest endpoint for Minecraft servers
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: exception-logger
+  namespace: build
+spec:
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: exception-logger
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exception-logger
+  namespace: build
+  labels:
+    app: exception-logger
+spec:
+  strategy:
+    type: Recreate
+  replicas: 1
+  selector:
+    matchLabels:
+      app: exception-logger
+  template:
+    metadata:
+      labels:
+        app: exception-logger
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - monumenta-18
+      volumes:
+        - name: exception-logger-storage
+          hostPath:
+            type: Directory
+            path: /nfs/exception-logger/build
+      containers:
+      - name: exception-logger
+        image: ghcr.io/teammonumenta/monumenta-automation/monumenta-exception-logger:latest
+        tty: false
+        stdin: false
+        volumeMounts:
+        - name: exception-logger-storage
+          mountPath: /data
+        env:
+        - name: DB_PATH
+          value: /data/tracker.db
+        # Comma-separated Java package prefixes used during fingerprinting.
+        # Frames outside these packages are treated as library frames.
+        - name: APP_PACKAGES
+          value: com.playmonumenta
+        - name: EXPIRY_DAYS
+          value: "14"
+        - name: PORT
+          value: "8080"
+        # Log a formatted entry to stdout for every ingest submission.
+        - name: VERBOSE
+          value: "false"
+        - name: DISCORD_CHANNEL
+          value: "1476717707553673399"
+        # How often (seconds) the bot re-edits all tracked channel messages.
+        - name: DISCORD_REFRESH_PERIOD_SECONDS
+          value: "300"
+        - name: SLASH_COMMAND_PREFIX
+          value: "ex_build_"
+        # Bot token loaded from a Kubernetes secret.
+        # Create the secret with:
+        #   kubectl create secret generic exception-logger --from-literal=discord-token='YOUR_TOKEN_HERE' -n <namespace>
+        - name: DISCORD_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: exception-logger
+              key: discord-token
+        resources:
+          limits:
+            cpu: 250m
+            memory: 256Mi
+          requests:
+            cpu: 50m
+            memory: 64Mi
