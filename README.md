@@ -68,11 +68,12 @@ The server is configured via environment variables:
 | `SLASH_COMMAND_PREFIX` | Prefix prepended to all slash command names (default: empty). Use to run multiple bots in one Discord - e.g. `ex_play_` makes `/new` become `/ex_play_new`. |
 | `CHISEL_PUBLIC_URL` | Base URL of this server's public endpoint (e.g. `https://exceptions.example.com`). When set, enables the Chisel integration: the `/chisel/poll` and `/chisel/callback/*` endpoints become active and the 🔧 reaction handler is enabled. |
 | `CHISEL_FIX_PROMPT_PATH` | Path to the `fix_exception_prompt.md` template rendered when a fix is requested (default: `fix_exception_prompt.md`). |
+| `CHISEL_ALLOWED_USERS` | Comma-separated list of Discord user IDs permitted to trigger Chisel fix requests. If empty (default), all users may trigger fixes. Users not on the list have their 🔧 reaction silently removed with no further action. |
 | `REACTION_FIX_REQUEST` | Emoji that triggers a Chisel fix request (default: 🔧). |
-| `REACTION_FIX_WORKING` | Emoji shown while a fix is in progress (default: 🔄). |
-| `REACTION_FIX_SUCCESS` | Emoji shown when Chisel opens a PR (default: 🟢). |
-| `REACTION_FIX_FAILURE` | Emoji shown when Chisel fails (default: 🔴). |
-| `REACTION_FIX_DECLINED` | Emoji shown when Chisel declines the task (default: 🟡). |
+| `REACTION_FIX_WORKING` | Emoji shown while a fix is in progress (default: 🔄). Set to empty string to suppress. |
+| `REACTION_FIX_SUCCESS` | Emoji shown when Chisel opens a PR (default: 🟢). Set to empty string to suppress. |
+| `REACTION_FIX_FAILURE` | Emoji shown when Chisel fails (default: 🔴). Set to empty string to suppress. |
+| `REACTION_FIX_DECLINED` | Emoji shown when Chisel declines the task (default: 🟡). Set to empty string to suppress. |
 
 ## Architecture
 

@@ -285,6 +285,7 @@ class ExceptionBot(commands.Bot):
         cfg = config or TrackerConfig()
         self._chisel_public_url: Optional[str] = cfg.chisel_public_url
         self._chisel_fix_prompt_path: str = cfg.chisel_fix_prompt_path
+        self._chisel_allowed_users: list[str] = cfg.chisel_allowed_users
         self._reaction_fix_request: str = cfg.reaction_fix_request
         self._reaction_fix_working: str = cfg.reaction_fix_working
         self._reaction_fix_success: str = cfg.reaction_fix_success
@@ -528,8 +529,17 @@ class ExceptionBot(commands.Bot):
         if not self._chisel_public_url:
             return
 
+        # If an allowed-users list is configured, silently ignore unauthorised users.
+        # The wrench is still removed below so no lingering reaction is left.
+        user_allowed = (
+            not self._chisel_allowed_users
+            or str(payload.user_id) in self._chisel_allowed_users
+        )
+
         job_queued = False
-        if self.tracker.has_active_fix_attempt(fingerprint):
+        if not user_allowed:
+            pass  # fall through to wrench removal
+        elif self.tracker.has_active_fix_attempt(fingerprint):
             logger.info(
                 "Fix request ignored: active fix attempt already exists for %s",
                 fingerprint[:8],
@@ -583,7 +593,7 @@ class ExceptionBot(commands.Bot):
                     logger.exception(
                         "Failed to remove fix reaction on message %d", payload.message_id
                     )
-            if job_queued:
+            if job_queued and self._reaction_fix_working:
                 await message.add_reaction(self._reaction_fix_working)
         except discord.DiscordException:
             logger.exception(
@@ -625,12 +635,13 @@ class ExceptionBot(commands.Bot):
                 )
                 try:
                     chan_message = await channel.fetch_message(int(message_id))
-                    if self.user is not None:
+                    if self.user is not None and self._reaction_fix_working:
                         try:
                             await chan_message.remove_reaction(self._reaction_fix_working, self.user)
                         except (discord.NotFound, discord.HTTPException):
                             pass  # reaction may already be gone
-                    await chan_message.add_reaction(outcome)
+                    if outcome:
+                        await chan_message.add_reaction(outcome)
                 except discord.DiscordException:
                     logger.exception(
                         "Failed to update reactions for fix completion on group %s",
