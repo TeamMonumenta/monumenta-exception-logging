@@ -19,6 +19,9 @@ _WORLD_DISTANCE_RE = re.compile(
     r'(measure distance between )[-_a-z0-9<>]+( and )[-_a-z0-9<>]+',
     re.IGNORECASE,
 )
+_PARTICLE_COUNT_RE = re.compile(r'\bCount: (?:\d+|<N>)')
+# Handles one level of nested braces (e.g. Location{world=CraftWorld{name=quests},...}).
+_LOCATION_BLOCK_RE = re.compile(r'Location\{(?:[^{}]|\{[^{}]*\})*\}')
 
 
 def normalize_message(message: str) -> str:
@@ -31,6 +34,8 @@ def normalize_message(message: str) -> str:
     s = _QUOTED_DOUBLE_RE.sub('<str>', s)
     s = _BRACKET_DATA_RE.sub('<data>', s)
     s = _LONG_TOKEN_RE.sub('<id>', s)
+    s = _PARTICLE_COUNT_RE.sub('Count: <N>', s)
+    s = _LOCATION_BLOCK_RE.sub('Location{<location>}', s)
     return s
 
 

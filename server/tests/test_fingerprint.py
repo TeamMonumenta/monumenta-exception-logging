@@ -237,6 +237,45 @@ class TestNormalizeMessage:
         msg2 = 'request blocked, ref: 20260317T210746Z-r1db49788dd97n9rhC1YTOp5cs00000001tg00000000fh40'
         assert normalize_message(msg1) == normalize_message(msg2)
 
+    def test_particle_count_normalized(self):
+        msg = 'PartialParticle (Type: DUST_COLOR_TRANSITION, Count: 1, ...) error'
+        result = normalize_message(msg)
+        assert 'Count: <N>' in result
+        assert 'Count: 1' not in result
+
+    def test_particle_count_large_number_normalized(self):
+        msg = 'PartialParticle (Type: DUST_COLOR_TRANSITION, Count: 12345, ...) error'
+        result = normalize_message(msg)
+        assert 'Count: <N>' in result
+        assert '12345' not in result
+
+    def test_location_block_normalized(self):
+        msg = ('PartialParticle (Type: DUST_COLOR_TRANSITION, Count: 1, '
+               'Location: "Location{world=CraftWorld{name=quests},x=123456.789,y=37.5678,z=-456789.123,pitch=47.1234,yaw=80.5678}") '
+               'has the wrong data type!')
+        result = normalize_message(msg)
+        assert 'Location{<location>}' in result
+        assert 'quests' not in result
+        assert 'x=' not in result
+
+    def test_particle_pair_same_fingerprint(self):
+        # Two PartialParticle errors differing only in coordinates/count should normalize identically.
+        msg1 = ('PartialParticle (Type: DUST_COLOR_TRANSITION, Count: 1, '
+                'Location: "Location{world=CraftWorld{name=quests},x=12345.6789,y=37.5678,z=-45678.9012,pitch=47.1234,yaw=80.5678}") '
+                'has the wrong data type! (Requires: DustTransition, Got: null)')
+        msg2 = ('PartialParticle (Type: DUST_COLOR_TRANSITION, Count: 1, '
+                'Location: "Location{world=CraftWorld{name=quests},x=12345.6789,y=37.5678,z=-45678.9012,pitch=-11.2345,yaw=184.5678}") '
+                'has the wrong data type! (Requires: DustTransition, Got: null)')
+        assert normalize_message(msg1) == normalize_message(msg2)
+
+    def test_location_block_nested_braces_handled(self):
+        # The Location block contains a nested brace (CraftWorld{name=...}) — must not truncate early.
+        msg = 'err Location{world=CraftWorld{name=foo},x=1.0,y=2.0} done'
+        result = normalize_message(msg)
+        assert 'Location{<location>}' in result
+        assert 'foo' not in result
+        assert 'done' in result
+
 
 # ===========================================================================
 # extract_app_frames
