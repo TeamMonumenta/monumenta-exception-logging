@@ -276,6 +276,22 @@ class TestNormalizeMessage:
         assert 'foo' not in result
         assert 'done' in result
 
+    def test_contraction_apostrophe_not_treated_as_quote(self):
+        # "Can't" — the apostrophe after 'n' is a contraction, not a quote delimiter.
+        # It must not consume text up to the next single-quote.
+        msg = "Can't unload world 'plot6771' because there are still players in it (HackJoinWorldFix check)"
+        result = normalize_message(msg)
+        assert "Can't" in result
+        assert 'plot6771' not in result
+        assert '<str>' in result
+
+    def test_world_unload_different_plots_same_normalized(self):
+        # Two "Can't unload world" messages differing only in the plot number must
+        # normalize identically so they land in the same exception group.
+        msg1 = "Can't unload world 'plot6771' because there are still players in it (HackJoinWorldFix check)"
+        msg2 = "Can't unload world 'plot1979' because there are still players in it (HackJoinWorldFix check)"
+        assert normalize_message(msg1) == normalize_message(msg2)
+
 
 # ===========================================================================
 # extract_app_frames
