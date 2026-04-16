@@ -76,6 +76,11 @@ spec:
           value: "300"
         - name: SLASH_COMMAND_PREFIX
           value: "ex_volt_"
+        # Comma-separated Discord user IDs allowed to run /purge.
+        # If unset or empty, no one can run the command.
+        # Just @Combustible for now
+        - name: DISCORD_PURGE_USERS
+          value: "302298391969267712"
         # Bot token loaded from a Kubernetes secret.
         # Create the secret with:
         #   kubectl create secret generic exception-logger --from-literal=discord-token='YOUR_TOKEN_HERE' -n <namespace>
