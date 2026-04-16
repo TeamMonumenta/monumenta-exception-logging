@@ -69,6 +69,7 @@ The server is configured via environment variables:
 | `CHISEL_PUBLIC_URL` | Base URL of this server's public endpoint (e.g. `https://exceptions.example.com`). When set, enables the Chisel integration: the `/chisel/poll` and `/chisel/callback/*` endpoints become active and the 🔧 reaction handler is enabled. |
 | `CHISEL_FIX_PROMPT_PATH` | Path to the `fix_exception_prompt.md` template rendered when a fix is requested (default: `fix_exception_prompt.md`). |
 | `CHISEL_ALLOWED_USERS` | Comma-separated list of Discord user IDs permitted to trigger Chisel fix requests. If empty (default), all users may trigger fixes. Users not on the list have their 🔧 reaction silently removed with no further action. |
+| `DISCORD_PURGE_USERS` | Comma-separated list of Discord user IDs permitted to run `/purge`. If empty (default), no one can run the command. |
 | `REACTION_FIX_REQUEST` | Emoji that triggers a Chisel fix request (default: 🔧). |
 | `REACTION_FIX_WORKING` | Emoji shown while a fix is in progress (default: 🔄). Set to empty string to suppress. |
 | `REACTION_FIX_SUCCESS` | Emoji shown when Chisel opens a PR (default: 🟢). Set to empty string to suppress. |
@@ -139,6 +140,7 @@ Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names a
 | `/mute` | `short_id` | Mute a group |
 | `/unmute` | `short_id` | Unmute a group |
 | `/resolve` | `short_id` | Mark a group resolved |
+| `/purge` | `[server] [older_than_days] [fixed] [muted]` | Delete exception groups matching the given filters (see `DISCORD_PURGE_USERS`) |
 | `/notify add` | `pattern` | Add a personal notification rule (Python regex) |
 | `/notify list` | - | List your notification rules with their IDs |
 | `/notify remove` | `id` | Remove a notification rule by ID |

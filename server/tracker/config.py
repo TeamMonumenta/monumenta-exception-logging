@@ -17,6 +17,8 @@ class TrackerConfig:
     chisel_fix_prompt_path: str = "fix_exception_prompt.md"
     # Discord user IDs allowed to trigger Chisel fix requests. Empty list = no restriction.
     chisel_allowed_users: list[str] = field(default_factory=list[str])
+    # Discord user IDs allowed to run /purge. Empty list = no one can run it.
+    purge_allowed_users: list[str] = field(default_factory=list[str])
     reaction_fix_request: str = "\U0001F527"   # 🔧
     reaction_fix_working: str = "\U0001F504"   # 🔄
     reaction_fix_success: str = "\U0001F7E2"   # 🟢
@@ -36,6 +38,8 @@ def from_env() -> TrackerConfig:
     )
     raw_allowed = os.environ.get("CHISEL_ALLOWED_USERS", "")
     chisel_allowed_users = [u.strip() for u in raw_allowed.split(",") if u.strip()]
+    raw_purge = os.environ.get("DISCORD_PURGE_USERS", "")
+    purge_allowed_users = [u.strip() for u in raw_purge.split(",") if u.strip()]
     return TrackerConfig(
         db_path=db_path,
         app_packages=app_packages,
@@ -44,6 +48,7 @@ def from_env() -> TrackerConfig:
         chisel_public_url=chisel_public_url,
         chisel_fix_prompt_path=chisel_fix_prompt_path,
         chisel_allowed_users=chisel_allowed_users,
+        purge_allowed_users=purge_allowed_users,
         reaction_fix_request=os.environ.get("REACTION_FIX_REQUEST", "\U0001F527"),
         reaction_fix_working=os.environ.get("REACTION_FIX_WORKING", "\U0001F504"),
         reaction_fix_success=os.environ.get("REACTION_FIX_SUCCESS", "\U0001F7E2"),

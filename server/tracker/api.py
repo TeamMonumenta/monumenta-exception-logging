@@ -539,6 +539,71 @@ class Tracker:
             rendered_message=str(row["rendered_message"]),
         )
 
+    # --- Purge ---
+
+    def purge_server(self, server: str) -> tuple[int, list[str]]:
+        """Delete groups where `server` is the only contributing server.
+
+        Groups that also have occurrences from other servers are left untouched.
+        Returns (groups_deleted, discord_message_ids). The caller is responsible
+        for deleting the Discord messages.
+        """
+        rows = self._conn.execute(
+            """SELECT id, discord_message_id FROM error_groups
+               WHERE id IN (
+                   SELECT DISTINCT group_id FROM occurrences WHERE server = ?
+               )
+               AND id NOT IN (
+                   SELECT DISTINCT group_id FROM occurrences WHERE server != ?
+               )""",
+            (server, server),
+        ).fetchall()
+        if not rows:
+            return 0, []
+        group_ids = [r['id'] for r in rows]
+        message_ids = [r['discord_message_id'] for r in rows if r['discord_message_id'] is not None]
+        placeholders = ','.join('?' * len(group_ids))
+        with self._conn:
+            self._conn.execute(
+                f"DELETE FROM error_groups WHERE id IN ({placeholders})",
+                group_ids,
+            )
+        return len(group_ids), message_ids
+
+    def purge_by_status(self, status: str) -> tuple[int, list[str]]:
+        """Delete all groups with the given status ('muted' or 'resolved').
+
+        Returns (groups_deleted, discord_message_ids). The caller is responsible
+        for deleting the Discord messages.
+        """
+        rows = self._conn.execute(
+            "SELECT id, discord_message_id FROM error_groups WHERE status = ?",
+            (status,),
+        ).fetchall()
+        if not rows:
+            return 0, []
+        group_ids = [r['id'] for r in rows]
+        message_ids = [r['discord_message_id'] for r in rows if r['discord_message_id'] is not None]
+        placeholders = ','.join('?' * len(group_ids))
+        with self._conn:
+            self._conn.execute(
+                f"DELETE FROM error_groups WHERE id IN ({placeholders})",
+                group_ids,
+            )
+        return len(group_ids), message_ids
+
+    def purge_older_than(self, days: int) -> tuple[int, list[str]]:
+        """Delete groups not seen within `days` days, plus orphaned occurrence/aggregate rows.
+
+        Delegates to db.run_expiry() with a caller-supplied retention window instead of
+        the configured expiry_days.
+
+        Returns (groups_deleted, discord_message_ids). The caller is responsible
+        for deleting the Discord messages.
+        """
+        result = db.run_expiry(self._conn, days)
+        return result['error_groups'], result['discord_message_ids']
+
     def complete_fix_attempt(
         self,
         job_id: str,

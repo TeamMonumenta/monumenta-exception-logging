@@ -291,6 +291,7 @@ class ExceptionBot(commands.Bot):
         self._reaction_fix_success: str = cfg.reaction_fix_success
         self._reaction_fix_failure: str = cfg.reaction_fix_failure
         self._reaction_fix_declined: str = cfg.reaction_fix_declined
+        self._purge_allowed_users: list[str] = cfg.purge_allowed_users
 
     async def setup_hook(self) -> None:
         self._register_commands()
@@ -1033,3 +1034,81 @@ class ExceptionBot(commands.Bot):
                 )
 
         self.tree.add_command(notify_group)
+
+        # --- /purge ---
+
+        @self.tree.command(
+            name=f"{p}purge",
+            description="Purge exception groups from the database (admin only)",
+        )
+        @app_commands.describe(
+            server="Delete groups where this server is the only contributor",
+            older_than_days="Delete groups not seen in the last N days (early expiry; min 1)",
+            fixed="Delete all groups marked as resolved",
+            muted="Delete all groups marked as muted",
+        )
+        async def cmd_purge(
+            interaction: discord.Interaction,
+            server: Optional[str] = None,
+            older_than_days: Optional[int] = None,
+            fixed: Optional[bool] = None,
+            muted: Optional[bool] = None,
+        ) -> None:
+            await interaction.response.defer(ephemeral=True)
+
+            if not self._purge_allowed_users or str(interaction.user.id) not in self._purge_allowed_users:
+                await interaction.followup.send("Not authorized.", ephemeral=True)
+                return
+
+            if not any([server, older_than_days is not None, fixed, muted]):
+                await interaction.followup.send(
+                    "Specify at least one filter: `server`, `older_than_days`, `fixed`, or `muted`.",
+                    ephemeral=True,
+                )
+                return
+
+            if older_than_days is not None and older_than_days < 1:
+                await interaction.followup.send(
+                    "`older_than_days` must be at least 1.", ephemeral=True
+                )
+                return
+
+            total_groups = 0
+            all_message_ids: set[str] = set()
+
+            if older_than_days is not None:
+                n, msg_ids = self.tracker.purge_older_than(older_than_days)
+                total_groups += n
+                all_message_ids.update(msg_ids)
+
+            if server:
+                n, msg_ids = self.tracker.purge_server(server)
+                total_groups += n
+                all_message_ids.update(msg_ids)
+
+            if fixed:
+                n, msg_ids = self.tracker.purge_by_status("resolved")
+                total_groups += n
+                all_message_ids.update(msg_ids)
+
+            if muted:
+                n, msg_ids = self.tracker.purge_by_status("muted")
+                total_groups += n
+                all_message_ids.update(msg_ids)
+
+            for msg_id in all_message_ids:
+                await self.delete_channel_message(msg_id)
+
+            if total_groups == 0:
+                await interaction.followup.send(
+                    "No groups matched the specified filters.", ephemeral=True
+                )
+                return
+
+            msg_count = len(all_message_ids)
+            summary = f"Purge complete: {total_groups} group(s) deleted"
+            if msg_count:
+                summary += f", {msg_count} Discord message(s) removed."
+            else:
+                summary += "."
+            await interaction.followup.send(summary, ephemeral=True)

@@ -67,6 +67,10 @@ spec:
         # How often (seconds) the bot re-edits all tracked channel messages.
         - name: DISCORD_REFRESH_PERIOD_SECONDS
           value: "300"
+        # Comma-separated Discord user IDs allowed to run /purge.
+        # If unset or empty, no one can run the command.
+        #- name: DISCORD_PURGE_USERS
+        #  value: "111111111111111111,222222222222222222"
         # Prefix prepended to all slash command names. Use when running multiple
         # bots in one Discord server to avoid command name collisions.
         # Example: "ex_play_" makes /new become /ex_play_new.
