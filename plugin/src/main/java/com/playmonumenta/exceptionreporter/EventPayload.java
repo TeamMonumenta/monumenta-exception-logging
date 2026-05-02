@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Byron Marohn
+
 package com.playmonumenta.exceptionreporter;
 
 import com.google.gson.FieldNamingPolicy;

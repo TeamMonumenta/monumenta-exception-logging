@@ -7,7 +7,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 - **Method:** `HTTP POST`
 - **Endpoint:** Configured via `EXCEPTLOG_INGEST_URL` environment variable on the server (e.g. `http://exception-tracker.internal/ingest`)
 - **Content-Type:** `application/json`
-- **Authentication:** None. The ingest server listens on plain HTTP with no auth. Security is provided entirely by the Kubernetes network boundary — the service is not exposed outside the cluster. This avoids per-request TLS/crypto overhead and removes secret management from the plugin.
+- **Authentication:** None. The ingest server listens on plain HTTP with no auth. Security is provided entirely by the Kubernetes network boundary - the service is not exposed outside the cluster. This avoids per-request TLS/crypto overhead and removes secret management from the plugin.
 - **Fire-and-forget:** The plugin does not retry on failure and does not block the server thread. Failures are silently dropped after logging a single warning.
 - **Batching:** Single events per POST. No batching in v1.
 
@@ -57,7 +57,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | Field | Type | Description |
 |---|---|---|
 | `class_name` | string | Fully-qualified exception class name, e.g. `"java.lang.NullPointerException"` or `"com.playmonumenta.plugins.SomeCustomException"`. |
-| `message` | string \| null | The exception's own message (`e.getMessage()`). Null if no message was set. May contain variable content (player names, coordinates, etc.) — the server normalizes this for fingerprinting. |
+| `message` | string \| null | The exception's own message (`e.getMessage()`). Null if no message was set. May contain variable content (player names, coordinates, etc.) - the server normalizes this for fingerprinting. |
 | `frames` | array | Ordered list of stack frames, from closest to throw site (index 0) to oldest caller. See Frame Object below. Includes all frames; the server filters for application frames during fingerprinting. |
 | `cause` | object \| null | The chained cause exception, if any (`e.getCause()`). Same structure as `exception`. Cause chains are captured up to a depth of 5 to prevent unbounded nesting. |
 
@@ -69,14 +69,14 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | `method` | string | Method name, e.g. `"<init>"`, `"processEntity"`. |
 | `file` | string \| null | Source file name, e.g. `"GenericTargetBoss.java"`. Null when compiled without debug info. |
 | `line` | integer | Source line number. `-1` if unknown (e.g. native methods, or compiled without debug info). |
-| `location` | string \| null | JAR file or module the class was loaded from, e.g. `"Monumenta.jar"`, `"paper-1.20.4.jar"`. Derived from `StackTraceElement.toString()` — the portion in brackets. Null when not available (`"?"`  in raw output is normalized to null). |
+| `location` | string \| null | JAR file or module the class was loaded from, e.g. `"Monumenta.jar"`, `"paper-1.20.4.jar"`. Derived from `StackTraceElement.toString()` - the portion in brackets. Null when not available (`"?"` in raw output is normalized to null). |
 
 ## Plugin Implementation Notes
 
 ### Log4j2 Appender vs. JUL Handler
 
 **Use a custom Log4j2 Appender attached programmatically at runtime.** This is preferred over a JUL handler because:
-- Log4j2 `LogEvent` is the primary logging event in Paper — JUL events are bridged to Log4j2, introducing extra overhead.
+- Log4j2 `LogEvent` is the primary logging event in Paper - JUL events are bridged to Log4j2, introducing extra overhead.
 - `LogEvent.getThrown()` gives direct Throwable access without going through JUL's `LogRecord`.
 - More precise filtering is possible at the Log4j2 level.
 
@@ -119,6 +119,34 @@ for (StackTraceElement ste : elements) {
                          ste.getFileName(), ste.getLineNumber(), location));
 }
 ```
+
+## Synthetic Exceptions from heap-logger
+
+The heap-logger microservice (`heap-logger/`) uses this same protocol to report memory
+leak patterns detected via heap dump analysis. It POSTs synthetic exceptions directly
+to the exception-logger's `POST /ingest` endpoint, bypassing the Java plugin entirely.
+
+These synthetic events use fixed, stable field values so that the fingerprinting algorithm
+groups the same leak pattern consistently across servers and over time:
+
+| Field | Value |
+|---|---|
+| `level` | `ERROR` |
+| `logger` | `com.playmonumenta.memoryleak.HeapAnalyzer` |
+| `thread` | `heap-worker` |
+| `message` | `Memory leak detected in heap dump` |
+| `exception.class_name` | `com.playmonumenta.memoryleak.MemoryLeakException` |
+| `exception.message` | `Leaked: <first class in retention chain> x <instance count>` |
+| `exception.frames` | One frame per step in the retention chain. `class_name` is the class at that step; `method` is the field name holding the reference, or `<ref>` if unknown. `file`, `line`, and `location` are always `null`, `-1`, and `null`. |
+| `exception.cause` | Always `null` |
+
+The `exception.message` field is the fingerprint key. The first class name in the
+retention chain is the leaked object type (e.g. `org/bukkit/craftbukkit/.../CraftPlayer`);
+using it verbatim ensures that the same leak on different servers produces the same
+fingerprint and is merged into one exception group.
+
+One POST is sent per leak pattern. A single heap dump analysis may produce multiple
+patterns, each reported as a separate ingest event.
 
 ## Concrete Example
 

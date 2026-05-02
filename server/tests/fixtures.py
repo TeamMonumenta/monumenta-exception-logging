@@ -491,6 +491,37 @@ REAL_CME_TAB = {
     },
 }
 
+# Synthetic MemoryLeakException produced by heap-logger from the heaptool
+# Class names use JVM slash notation because heaptool outputs raw internal class names.
+HEAP_LEAK_CRAFT_PLAYER = {
+    'schema_version': 1,
+    'server_id': 'survival-0',
+    'timestamp_ms': _NOW_MS,
+    'level': 'ERROR',
+    'logger': 'com.playmonumenta.memoryleak.HeapAnalyzer',
+    'thread': 'heap-worker',
+    'message': 'Memory leak detected in heap dump',
+    'exception': {
+        'class_name': 'com.playmonumenta.memoryleak.MemoryLeakException',
+        'message': 'Leaked: org/bukkit/craftbukkit/v1_20_R3/entity/CraftPlayer x 173',
+        'frames': [
+            {'class_name': 'org/bukkit/craftbukkit/v1_20_R3/entity/CraftPlayer',
+             'method': '<ref>', 'file': None, 'line': -1, 'location': None},
+            {'class_name': 'com/playmonumenta/plugins/SomeManager$1',
+             'method': 'val$player', 'file': None, 'line': -1, 'location': None},
+            {'class_name': 'org/bukkit/craftbukkit/v1_20_R3/scheduler/CraftTask',
+             'method': 'rTask', 'file': None, 'line': -1, 'location': None},
+            {'class_name': '[Ljava/lang/Object;[]',
+             'method': '<ref>', 'file': None, 'line': -1, 'location': None},
+            {'class_name': 'java/util/PriorityQueue',
+             'method': 'queue', 'file': None, 'line': -1, 'location': None},
+            {'class_name': 'org/bukkit/craftbukkit/v1_20_R3/scheduler/CraftScheduler',
+             'method': 'pending', 'file': None, 'line': -1, 'location': None},
+        ],
+        'cause': None,
+    },
+}
+
 EXAMPLE_EVENT = {
     'schema_version': 1,
     'server_id': 'survival-0',

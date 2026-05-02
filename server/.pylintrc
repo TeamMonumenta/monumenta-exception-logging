@@ -27,6 +27,8 @@ disable=
     redefined-outer-name,
     # sys.path manipulation before imports in standalone-runnable test files
     wrong-import-position,
+    # test files legitimately share boilerplate assertion patterns
+    duplicate-code,
 
 [REPORTS]
 score=yes

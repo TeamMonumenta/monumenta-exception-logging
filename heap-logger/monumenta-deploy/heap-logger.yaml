@@ -1,0 +1,67 @@
+# heap-logger DaemonSet — one cluster-wide instance
+#
+# Minecraft pods reach this service via internalTrafficPolicy: Local, which routes
+# traffic to the DaemonSet pod on the same node. Set HEAPLOG_INGEST_URL in each
+# Minecraft pod to the full cross-namespace FQDN:
+#   http://heap-logger.<namespace>.svc.cluster.local:8081/ingest
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: heap-logger
+  labels:
+    app: heap-logger
+spec:
+  selector:
+    matchLabels:
+      app: heap-logger
+  template:
+    metadata:
+      labels:
+        app: heap-logger
+    spec:
+      volumes:
+        - name: spark-heapdumps
+          hostPath:
+            type: Directory
+            path: /nfs/5_SCRATCH/spark
+      containers:
+      - name: heap-logger
+        image: ghcr.io/teammonumenta/monumenta-automation/heap-logger:latest
+        volumeMounts:
+        - name: spark-heapdumps
+          mountPath: /spark
+        ports:
+        - containerPort: 8081
+        env:
+        - name: HEAPLOG_PORT
+          value: "8081"
+        - name: HEAPLOG_HEAPTOOL_PATH
+          value: /usr/local/bin/heaptool
+        - name: HEAPLOG_HEAPTOOL_EXTRA_ARGS
+          value: "--min-leaked 3 --min-pattern-leaked 3"
+        - name: HEAPLOG_RETENTION_DAYS
+          value: "7"
+        - name: HEAPLOG_HEAPDUMP_DIR
+          value: /spark
+        resources:
+          requests:
+            cpu: 500m
+            memory: 12Gi
+          limits:
+            cpu: 500m
+            memory: 12Gi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: heap-logger
+spec:
+  internalTrafficPolicy: Local
+  ports:
+  - port: 8081
+    targetPort: 8081
+  selector:
+    app: heap-logger

@@ -1,6 +1,3 @@
-# Actual production config files
-*.yaml
-
 # Python
 __pycache__/
 *.py[cod]

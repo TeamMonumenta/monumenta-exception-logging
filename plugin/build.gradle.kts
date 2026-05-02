@@ -7,6 +7,7 @@ plugins {
 dependencies {
 	compileOnly(libs.gson)
 	compileOnly(libs.log4jCore)
+	compileOnly(libs.monumentaNetworkRelay)
 }
 
 monumenta {
@@ -16,5 +17,6 @@ monumenta {
 		"com.playmonumenta.exceptionreporter.ExceptionReporterPlugin",
 		BukkitPluginDescription.PluginLoadOrder.STARTUP,
 		"1.18",
+		softDepends = listOf("MonumentaNetworkRelay", "spark"),
 	)
 }

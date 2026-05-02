@@ -1,8 +1,8 @@
 # Monumenta Exception Logger
 
-Custom exception tracker used by the Monumenta Minecraft network.
-Aggregates and fingerprints exceptions from all servers into a central SQLite
-database, with Discord integration for alerts and triage.
+Custom exception and memory-leak tracker used by the Monumenta Minecraft network.
+Aggregates and fingerprints exceptions and heap-dump leak patterns from all servers
+into a central SQLite database, with Discord integration for alerts and triage.
 
 Minimal requirements make this relatively simple to deploy in any setup.
 
@@ -28,6 +28,8 @@ The plugin is configured via environment variables for simplicity in a docker/ku
 | `EXCEPTLOG_INGEST_URL` | Full URL of the Python server's `POST /ingest` endpoint |
 | `EXCEPTLOG_SERVER_NAME` | Server identity included in every event; falls back to hostname |
 | `EXCEPTLOG_VERBOSE` | Set to any non-empty value other than `false` to enable verbose logging (logs every exception queued and each successful POST) |
+| `HEAPLOG_INGEST_URL` | URL of the heap-logger's `POST /ingest` endpoint (e.g. `http://heap-logger.<ns>.svc.cluster.local:8081/ingest`). If unset, heap dump reporting is disabled. When set, the always-on log watcher reports heap dumps whenever `/spark heapdump` is run (manually or triggered by another plugin). spark must be present. |
+| `HEAPLOG_AUTO_DUMP` | Set to any non-empty value other than `false` to automatically trigger a heap dump via `spark heapdump` when a `LowMemoryEvent` is received from MonumentaNetworkRelay. Default: off (log watcher still runs; only manual dumps are reported). Requires `HEAPLOG_INGEST_URL` to be set and MonumentaNetworkRelay to be present. |
 
 ### In-game commands
 
