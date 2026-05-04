@@ -121,14 +121,14 @@ class TestNormalizeMessage:
         assert '<N>' in result
         assert '2748835' not in result
 
-    def test_short_numbers_not_replaced(self):
-        # 1–3 digit numbers should remain as-is.
+    def test_all_numbers_replaced(self):
+        # All numbers including 1–3 digit ones should be replaced.
         msg = 'Error at slot 3 with 12 items and 999 stacks'
         result = normalize_message(msg)
-        assert '3' in result
-        assert '12' in result
-        assert '999' in result
-        assert '<N>' not in result
+        assert '3' not in result
+        assert '12' not in result
+        assert '999' not in result
+        assert '<N>' in result
 
     def test_single_quoted_string_replaced(self):
         msg = "Entity name='Lunar Omen', something else"
@@ -202,11 +202,12 @@ class TestNormalizeMessage:
         assert '<id>' in result
         assert token not in result
 
-    def test_short_alphanumeric_not_replaced(self):
-        # 20-char token — under the 32-char threshold, must not be replaced.
+    def test_short_alphanumeric_digit_portion_replaced(self):
+        # 20-char token — under the 32-char threshold for <id>, but the numeric
+        # portion is still replaced by the all-numbers rule.
         msg = 'error code ABC12345678901234567890 end'
         result = normalize_message(msg)
-        assert 'ABC12345678901234567890' in result
+        assert 'ABC<N>' in result
         assert '<id>' not in result
 
     def test_bad1_pair_same_fingerprint(self):

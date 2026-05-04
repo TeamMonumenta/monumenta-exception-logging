@@ -39,13 +39,13 @@ def test_heap_leak_ingest_creates_group(fresh_api):
     assert details.status == 'active'
 
 
-def test_heap_leak_message_template_preserves_slash_class_name(fresh_api):
-    # Instance count 173 is < 4 digits so it is NOT normalized to <N>.
-    # The slash class name is preserved verbatim (normalization has no slash-specific rule).
+def test_heap_leak_message_template_normalizes_numbers(fresh_api):
+    # All numbers are replaced with <N>, including the version in the JVM class path and
+    # the instance count.  The slash class name structure is otherwise preserved verbatim.
     fp, _ = fresh_api.ingest_event(parse_event(HEAP_LEAK_CRAFT_PLAYER))
     details = fresh_api.get_group_details(fp)
     assert details.message_template == (
-        'Leaked: org/bukkit/craftbukkit/v1_20_R3/entity/CraftPlayer x 173'
+        'Leaked: org/bukkit/craftbukkit/v<N>_<N>_R<N>/entity/CraftPlayer x <N>'
     )
 
 
@@ -110,8 +110,8 @@ def test_heap_leak_slash_frames_not_matched_as_app_frames(fresh_api):
 # ===========================================================================
 
 def test_heap_leak_large_count_normalized_groups_different_counts(fresh_api):
-    # Instance counts >= 4 digits are replaced by <N>, so two dumps of the same
-    # bug with different large counts map to the same fingerprint.
+    # All numbers are replaced by <N>, so two dumps of the same bug with
+    # different counts map to the same fingerprint.
     event_10k = {
         **HEAP_LEAK_CRAFT_PLAYER,
         'server_id': 'survival-0',
@@ -135,11 +135,9 @@ def test_heap_leak_large_count_normalized_groups_different_counts(fresh_api):
     assert '<N>' in details.message_template
 
 
-def test_heap_leak_small_count_not_normalized_produces_different_groups(fresh_api):
-    # Instance counts < 4 digits are NOT normalized, so dumps of the same bug with
-    # different small counts produce distinct fingerprints.  This is a known limitation:
-    # for high-frequency leaks the count is large enough to normalize; for rare leaks
-    # count drift can split a group.
+def test_heap_leak_small_count_normalized_groups_together(fresh_api):
+    # All numbers are normalized to <N>, so dumps of the same bug with different
+    # instance counts (small or large) always map to the same fingerprint.
     event_a = {
         **HEAP_LEAK_CRAFT_PLAYER,
         'exception': {
@@ -156,4 +154,4 @@ def test_heap_leak_small_count_not_normalized_produces_different_groups(fresh_ap
     }
     fp_a, _ = fresh_api.ingest_event(parse_event(event_a))
     fp_b, _ = fresh_api.ingest_event(parse_event(event_b))
-    assert fp_a != fp_b
+    assert fp_a == fp_b
