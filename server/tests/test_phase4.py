@@ -318,6 +318,35 @@ def test_format_message_truncation_stays_under_limit():
     assert "more frames" in msg
 
 
+def test_format_message_long_exc_line_stays_under_limit():
+    # A very long message_template that alone would exceed 2000 chars
+    from datetime import datetime
+    from tracker.api import FrameSummary
+    now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    frames = [FrameSummary(class_name="com.example.Foo", method="bar", file="Foo.java", line=1)]
+    details = GroupDetails(
+        fingerprint="abcd1234" + "0" * 56,
+        exception_class="java.lang.RuntimeException",
+        message_template="x" * 3000,
+        status="active",
+        first_seen=now,
+        last_seen=now,
+        total_count=1,
+        logger="com.example.Foo",
+        canonical_frames=frames,
+        canonical_trace=frames,
+        servers_affected=["srv-1"],
+        server_counts_24h={"srv-1": 1},
+        hourly_timeline=[],
+        muted_by=None,
+        muted_at=None,
+        resolved_by=None,
+        resolved_at=None,
+    )
+    msg = format_exception_message(details)
+    assert len(msg) <= 2000
+
+
 def test_format_message_servers_listed():
     details = _make_details()
     msg = format_exception_message(details)
@@ -346,6 +375,14 @@ def test_build_frames_block_truncates():
     result = _build_frames_block(lines, 200)
     assert len(result) <= 200
     assert "more frames" in result
+
+
+def test_build_frames_block_trailer_always_present():
+    # Budget too small for any frame but large enough for the trailer alone.
+    lines = ["x" * 50 for _ in range(5)]
+    result = _build_frames_block(lines, 40)
+    assert "more frames" in result
+    assert len(result) <= 40
 
 
 def test_build_frames_block_empty():

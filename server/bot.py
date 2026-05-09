@@ -38,34 +38,40 @@ def _fmt_frame(frame: FrameSummary) -> str:
 
 
 def _build_frames_block(frame_lines: list[str], available: int) -> str:
-    """Return frame text that fits within *available* characters."""
-    if not frame_lines:
+    """Return frame text that fits within *available* characters.
+
+    When frames must be truncated, the '... (N more frames)' trailer is always
+    shown. Its space is pre-budgeted using the worst-case trailer length so it
+    is guaranteed to fit.
+    """
+    if not frame_lines or available <= 0:
         return ""
     total = len(frame_lines)
     full = "\n".join(frame_lines)
     if len(full) <= available:
         return full
 
+    # Pre-budget for the longest possible trailer so it always fits.
+    max_trailer = f"\n  ... ({total} more frames)"
+    frame_budget = available - len(max_trailer)
+
+    if frame_budget <= 0:
+        bare = max_trailer.lstrip("\n")
+        return bare if len(bare) <= available else ""
+
     included: list[str] = []
-    for i, line in enumerate(frame_lines):
-        remaining = total - i - 1
+    for line in frame_lines:
         candidate = "\n".join(included + [line])
-        if remaining > 0:
-            suffix = f"\n  ... ({total - len(included) - 1} more frames)"
-            if len(candidate + suffix) <= available:
-                included.append(line)
-            else:
-                break
+        if len(candidate) <= frame_budget:
+            included.append(line)
         else:
-            if len(candidate) <= available:
-                included.append(line)
+            break
 
     dropped = total - len(included)
     result = "\n".join(included)
-    if dropped > 0:
-        trailer = f"\n  ... ({dropped} more frames)"
-        result = (result + trailer) if included else trailer.lstrip("\n")
-    return result
+    if included:
+        return result + f"\n  ... ({dropped} more frames)"
+    return f"  ... ({dropped} more frames)"
 
 
 def format_exception_message(details: GroupDetails, max_len: int = _MAX_MSG_LEN) -> str:
@@ -93,9 +99,6 @@ def format_exception_message(details: GroupDetails, max_len: int = _MAX_MSG_LEN)
 
     frame_lines = [_fmt_frame(f) for f in details.canonical_trace]
 
-    error_open = f"Error: ```\n{exc_line}\n"
-    error_close = "\n```"
-
     if details.status == "muted" and details.muted_at is not None:
         ts = int(details.muted_at.timestamp())
         by = details.muted_by or "unknown"
@@ -110,11 +113,17 @@ def format_exception_message(details: GroupDetails, max_len: int = _MAX_MSG_LEN)
         wrap_prefix = ""
         wrap_suffix = ""
 
-    fixed = wrap_prefix + header + error_open + error_close + wrap_suffix
-    available = max_len - len(fixed)
-    frames_block = _build_frames_block(frame_lines, available)
+    # Skeleton length: everything except exc_line and frames.
+    # Full structure: wrap_prefix + header + "Error: ```\n" + exc_line + "\n" + frames + "\n```" + wrap_suffix
+    skeleton = wrap_prefix + header + "Error: ```\n\n\n```" + wrap_suffix
+    budget = max_len - len(skeleton)
 
-    return wrap_prefix + header + error_open + frames_block + error_close + wrap_suffix
+    if len(exc_line) > budget:
+        exc_line = exc_line[:max(0, budget - 3)] + "..."
+
+    frames_block = _build_frames_block(frame_lines, budget - len(exc_line))
+
+    return wrap_prefix + header + f"Error: ```\n{exc_line}\n" + frames_block + "\n```" + wrap_suffix
 
 
 def format_notify_dm(details: GroupDetails, matching_rules: list[tuple[int, str]]) -> str:
