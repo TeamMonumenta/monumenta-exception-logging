@@ -222,6 +222,7 @@ The fingerprint is computed by the Python ingest service from the raw event. It 
    - Quoted string values → `<str>` (pattern: `'[^']{1,64}'` or `"[^"]{1,64}"`)
    - Sequences of tags/NBT-like content in brackets → `<data>`
    - Long opaque alphanumeric tokens (≥ 32 characters composed of `[A-Za-z0-9_-]`) → `<id>` (catches CDN/WAF request IDs, auth tokens, hashes, etc. — any long token that isn't a bare UUID)
+   - Guild permission keys matching `guild.<name>.<role>` → `guild.<id>` (catches varying guild names like `guild.nova+.member`, `guild.lads.member`)
 
    Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`.
 3. `top_app_frames` — the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).

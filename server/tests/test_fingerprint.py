@@ -293,6 +293,24 @@ class TestNormalizeMessage:
         msg2 = "Can't unload world 'plot1979' because there are still players in it (HackJoinWorldFix check)"
         assert normalize_message(msg1) == normalize_message(msg2)
 
+    def test_guild_id_replaced(self):
+        msg = 'java.lang.RuntimeException: Could not find guild root for guild.nova+.member'
+        result = normalize_message(msg)
+        assert 'guild.<id>' in result
+        assert 'nova+' not in result
+
+    def test_guild_ids_produce_same_normalized_form(self):
+        msg1 = 'java.lang.RuntimeException: Could not find guild root for guild.nova+.member'
+        msg2 = 'java.lang.RuntimeException: Could not find guild root for guild.yumeki.member'
+        msg3 = 'java.lang.RuntimeException: Could not find guild root for guild.lads.member'
+        assert normalize_message(msg1) == normalize_message(msg2) == normalize_message(msg3)
+
+    def test_guild_id_with_digits_replaced(self):
+        msg = 'Could not find guild root for guild.team123.leader'
+        result = normalize_message(msg)
+        assert 'guild.<id>' in result
+        assert 'team123' not in result
+
 
 # ===========================================================================
 # extract_app_frames

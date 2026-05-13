@@ -99,6 +99,7 @@ bug always groups together:
 | Bracket data | `<data>` | boss tag lists, NBT |
 | Long opaque token (>= 32 `[A-Za-z0-9_-]` chars) | `<id>` | CDN/WAF request IDs, auth tokens, hashes |
 | World names after "measure distance between ... and ..." | `<world1>`, `<world2>` | `plot3769`, `ringinstance101` |
+| Guild permission key (`guild.<name>.<role>`) | `guild.<id>` | `guild.nova+.member`, `guild.lads.member` |
 
 At startup the server automatically re-fingerprints all existing groups using the current
 normalization rules. Groups whose fingerprint changes are updated in place; groups that become
