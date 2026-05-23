@@ -1,0 +1,8 @@
+{
+  "pythonVersion": "3.12",
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "strict",
+  "include": ["config.py", "db.py", "store.py", "github.py", "bot.py", "server.py"],
+  "reportUnusedFunction": "none"
+}
