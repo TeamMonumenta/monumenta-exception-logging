@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import discord
 from discord import app_commands
@@ -400,8 +400,15 @@ class PrBot(commands.Bot):
 
     # ── reconcile ─────────────────────────────────────────────────────────────
 
-    async def reconcile_message(self, message_id: str) -> None:
-        """Set the message's reactions to exactly the desired managed-emoji set."""
+    async def reconcile_message(
+        self, message_id: str, purge_unknown: bool = False,
+    ) -> None:
+        """Set the message's reactions to exactly the desired managed-emoji set.
+
+        purge_unknown: also remove bot reactions whose emoji isn't in the current
+        managed set. Used by startup reconcile to clean up reactions left from a
+        previous config (e.g. an emoji default that has since been changed).
+        """
         channel = await self._get_channel()
         if channel is None:
             return
@@ -427,22 +434,31 @@ class PrBot(commands.Bot):
             logger.exception("reconcile_message: failed to fetch message %s", message_id)
             return
 
-        # Managed emoji where the bot itself has already reacted
+        # Managed emoji where the bot itself has already reacted, plus any
+        # bot-placed reactions that don't match the current managed set
+        # (only collected when purge_unknown is set).
         present: set[str] = set()
+        stale: list[Any] = []
         for reaction in message.reactions:
             if not reaction.me:
                 continue
+            matched = False
             for cfg_emoji in managed:
                 if _emoji_matches(reaction, cfg_emoji):
                     present.add(cfg_emoji)
+                    matched = True
+                    break
+            if not matched and purge_unknown:
+                stale.append(reaction.emoji)
 
         to_add = desired - present
         to_remove = present - desired
 
-        if to_add or to_remove:
+        if to_add or to_remove or stale:
             logger.info(
-                "Reconcile %s: +%s -%s (desired=%s)",
-                message_id, sorted(to_add), sorted(to_remove), sorted(desired),
+                "Reconcile %s: +%s -%s stale=%s (desired=%s)",
+                message_id, sorted(to_add), sorted(to_remove),
+                [str(e) for e in stale], sorted(desired),
             )
         else:
             logger.debug(
@@ -456,21 +472,10 @@ class PrBot(commands.Bot):
                 logger.exception("reconcile: failed to add reaction %r to %s", emoji, message_id)
 
         for emoji in to_remove:
-            try:
-                await message.clear_reaction(_reaction_str(emoji))
-            except discord.Forbidden:
-                # No Manage Messages — remove only our own reaction
-                try:
-                    if self.user:
-                        await message.remove_reaction(_reaction_str(emoji), self.user)
-                except discord.DiscordException:
-                    logger.exception(
-                        "reconcile: failed to remove reaction %r from %s", emoji, message_id
-                    )
-            except discord.DiscordException:
-                logger.exception(
-                    "reconcile: failed to clear reaction %r from %s", emoji, message_id
-                )
+            await self._remove_bot_reaction(message, _reaction_str(emoji), message_id)
+
+        for stale_emoji in stale:
+            await self._remove_bot_reaction(message, stale_emoji, message_id)
 
         # Update done flag
         if prs:
@@ -481,6 +486,26 @@ class PrBot(commands.Bot):
                     "done (all PRs terminal)" if all_terminal else "active",
                 )
                 self.store.set_message_done(message_id, all_terminal)
+
+    async def _remove_bot_reaction(
+        self, message: discord.Message, emoji: Any, message_id: str,
+    ) -> None:
+        """Clear `emoji` from `message`, falling back to per-user removal if we lack Manage Messages."""
+        try:
+            await message.clear_reaction(emoji)
+        except discord.Forbidden:
+            # No Manage Messages — remove only our own reaction
+            try:
+                if self.user:
+                    await message.remove_reaction(emoji, self.user)
+            except discord.DiscordException:
+                logger.exception(
+                    "reconcile: failed to remove reaction %r from %s", emoji, message_id
+                )
+        except discord.DiscordException:
+            logger.exception(
+                "reconcile: failed to clear reaction %r from %s", emoji, message_id
+            )
 
     # ── DM helper ─────────────────────────────────────────────────────────────
 
@@ -907,6 +932,24 @@ class PrBot(commands.Bot):
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception("Startup poll failed for %s#%d", pr.repo, pr.pr_number)
             await asyncio.sleep(0.5)
+
+        # Final sweep: reconcile every tracked in-window message with
+        # purge_unknown=True so bot reactions left from a previous config
+        # (e.g. an emoji default that has since been changed) get cleaned up.
+        # Reconciles run earlier in this method only cover newly-backfilled
+        # messages and those linking PRs with a missed transition; this sweep
+        # catches the rest.
+        sweep_msgs = self.store.get_messages_in_window()
+        logger.info(
+            "Startup reconcile: sweeping %d tracked message(s) for stale reactions...",
+            len(sweep_msgs),
+        )
+        for msg in sweep_msgs:
+            try:
+                await self.reconcile_message(msg.message_id, purge_unknown=True)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("Startup sweep failed for message %s", msg.message_id)
+            await asyncio.sleep(0.2)
 
         logger.info("Startup reconcile complete.")
 
