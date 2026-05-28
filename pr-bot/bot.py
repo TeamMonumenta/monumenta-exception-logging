@@ -596,29 +596,22 @@ class PrBot(commands.Bot):
             logger.debug("%s#%d: no tracked messages link this PR", repo, pr_number)
             return
 
-        # Collect distinct recipient author_ids and their applicable transitions
-        recipient_transitions: dict[str, list[str]] = {}
+        # Collect distinct recipient author_ids and their applicable transitions.
+        # Using a set per author dedupes the case where the same user posted the
+        # same PR link in multiple messages — otherwise they'd get one DM per message.
+        recipient_transitions: dict[str, set[str]] = {}
         if status_changed and new_status in ("approved", "changes_requested", "commented") \
                 and actor != pr_author:
             for msg in messages:
                 if msg.done:
                     continue
-                author_id = msg.author_id
-                if author_id not in recipient_transitions:
-                    recipient_transitions[author_id] = []
-                recipient_transitions[author_id].append(new_status)
+                recipient_transitions.setdefault(msg.author_id, set()).add(new_status)
         if merged_changed:
             for msg in messages:
-                author_id = msg.author_id
-                if author_id not in recipient_transitions:
-                    recipient_transitions[author_id] = []
-                recipient_transitions[author_id].append("merged")
+                recipient_transitions.setdefault(msg.author_id, set()).add("merged")
         if closed_changed:
             for msg in messages:
-                author_id = msg.author_id
-                if author_id not in recipient_transitions:
-                    recipient_transitions[author_id] = []
-                recipient_transitions[author_id].append("closed")
+                recipient_transitions.setdefault(msg.author_id, set()).add("closed")
 
         for msg in messages:
             if msg.done and not (merged_changed or closed_changed):
