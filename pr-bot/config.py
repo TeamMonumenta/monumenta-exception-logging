@@ -17,22 +17,22 @@ class PrBotConfig:
     pr_cleanup_period_seconds: int = 3600
     pr_dm_enabled: bool = True
     review_comment_is_changes: bool = True
-    reaction_approved: str = "✅"           # ✅
-    reaction_changes: str = "\U0001F4AC"        # 💬
-    reaction_merged: str = "\U0001F500"         # 🔀
-    reaction_closed: str = "\U0000274C"         # ❌
-    reaction_question: str = "❓"           # ❓
+    reaction_approved: str = "✅"
+    reaction_changes: str = "💬"
+    reaction_merged: str = "🔀"
+    reaction_closed: str = "❌"
+    reaction_question: str = "❓"
     # Label-driven reactions (the label name to match is also configurable).
     label_ready: str = "ready"
     label_not_ready: str = "Not Ready/Delayed"
     label_tested: str = "Tested"
     label_monthly_balance: str = "monthly-balance"
-    reaction_ready: str = "\U0001F7E2"          # 🟢
-    reaction_not_ready: str = "\U0001F7E0"      # 🟠
-    reaction_tested: str = "\U0001F535"         # 🔵
-    reaction_monthly_balance: str = "\U0001F534"  # 🔴
+    reaction_ready: str = "🟢"
+    reaction_not_ready: str = "🟠"
+    reaction_tested: str = "🧪"
+    reaction_monthly_balance: str = "⚖️"
     # Automated-check status reaction (🐶 when any check is failing).
-    reaction_checks_failed: str = "\U0001F436"  # 🐶
+    reaction_checks_failed: str = "🐶"
     verbose: bool = True
 
     def label_map(self) -> dict[str, str]:
@@ -89,18 +89,18 @@ def from_env() -> PrBotConfig:
         pr_dm_enabled=pr_dm_enabled,
         review_comment_is_changes=review_comment_is_changes,
         reaction_approved=os.environ.get("REACTION_APPROVED", "✅"),
-        reaction_changes=os.environ.get("REACTION_CHANGES", "\U0001F4AC"),
-        reaction_merged=os.environ.get("REACTION_MERGED", "\U0001F500"),
-        reaction_closed=os.environ.get("REACTION_CLOSED", "\U0000274C"),
+        reaction_changes=os.environ.get("REACTION_CHANGES", "💬"),
+        reaction_merged=os.environ.get("REACTION_MERGED", "🔀"),
+        reaction_closed=os.environ.get("REACTION_CLOSED", "❌"),
         reaction_question=os.environ.get("REACTION_QUESTION", "❓"),
         label_ready=os.environ.get("LABEL_READY", "ready"),
         label_not_ready=os.environ.get("LABEL_NOT_READY", "Not Ready/Delayed"),
         label_tested=os.environ.get("LABEL_TESTED", "Tested"),
         label_monthly_balance=os.environ.get("LABEL_MONTHLY_BALANCE", "monthly-balance"),
-        reaction_ready=os.environ.get("REACTION_READY", "\U0001F7E2"),
-        reaction_not_ready=os.environ.get("REACTION_NOT_READY", "\U0001F7E0"),
-        reaction_tested=os.environ.get("REACTION_TESTED", "\U0001F535"),
-        reaction_monthly_balance=os.environ.get("REACTION_MONTHLY_BALANCE", "\U0001F534"),
-        reaction_checks_failed=os.environ.get("REACTION_CHECKS_FAILED", "\U0001F436"),
+        reaction_ready=os.environ.get("REACTION_READY", "🟢"),
+        reaction_not_ready=os.environ.get("REACTION_NOT_READY", "🟠"),
+        reaction_tested=os.environ.get("REACTION_TESTED", "🧪"),
+        reaction_monthly_balance=os.environ.get("REACTION_MONTHLY_BALANCE", "⚖️"),
+        reaction_checks_failed=os.environ.get("REACTION_CHECKS_FAILED", "🐶"),
         verbose=verbose,
     )

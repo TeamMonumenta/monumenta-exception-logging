@@ -17,7 +17,7 @@ A Discord bot that keeps `#pending-prs` reactions in sync with GitHub pull reque
   - ❌ all PRs closed, at least one without merging
   - ❓ message has no PR links
 - Mirrors merge-readiness **labels** as reactions (any open linked PR carrying the label):
-  - 🟢 `ready`, 🟠 `Not Ready/Delayed`, 🔵 `Tested`, 🔴 `monthly-balance`
+  - 🟢 `ready`, 🟠 `Not Ready/Delayed`, 🧪 `Tested`, ⚖️ `monthly-balance`
   - label names are matched case-insensitively; both the name and the emoji are configurable
 - 🐶 when any GitHub Actions check is **failing** on an open linked PR; removed once all pass
 - DMs the message poster when their PR is reviewed or merged (configurable per-user with
@@ -58,12 +58,12 @@ python server.py
 | `REACTION_QUESTION` | `❓` | | Override with Unicode or `name:id` |
 | `LABEL_READY` | `ready` | | GitHub label name (case-insensitive) for the 🟢 reaction |
 | `LABEL_NOT_READY` | `Not Ready/Delayed` | | GitHub label name for the 🟠 reaction |
-| `LABEL_TESTED` | `Tested` | | GitHub label name for the 🔵 reaction |
-| `LABEL_MONTHLY_BALANCE` | `monthly-balance` | | GitHub label name for the 🔴 reaction |
+| `LABEL_TESTED` | `Tested` | | GitHub label name for the 🧪 reaction |
+| `LABEL_MONTHLY_BALANCE` | `monthly-balance` | | GitHub label name for the ⚖️ reaction |
 | `REACTION_READY` | `🟢` | | Reaction when an open PR has the `ready` label. Override with Unicode or `name:id` |
 | `REACTION_NOT_READY` | `🟠` | | Reaction for the `Not Ready/Delayed` label. Override with Unicode or `name:id` |
-| `REACTION_TESTED` | `🔵` | | Reaction for the `Tested` label. Override with your `:blue_check:` custom emoji as `name:id` |
-| `REACTION_MONTHLY_BALANCE` | `🔴` | | Reaction for the `monthly-balance` label. Override with Unicode or `name:id` |
+| `REACTION_TESTED` | `🧪` | | Reaction for the `Tested` label. Override with Unicode or `name:id` |
+| `REACTION_MONTHLY_BALANCE` | `⚖️` | | Reaction for the `monthly-balance` label. Override with Unicode or `name:id` |
 | `REACTION_CHECKS_FAILED` | `🐶` | | Reaction when an automated check is failing on an open PR. Override with Unicode or `name:id` |
 | `VERBOSE` | `true` | | Logging verbosity. Any value other than `false` (case-insensitive) raises the bot's own log level to `DEBUG`; `false` keeps it at `INFO` (see [Logging](#logging)) |
 
@@ -156,7 +156,7 @@ Register a GitHub webhook (org-level recommended) at `https://pr-bot.playmonumen
 
 | Event | Drives |
 |---|---|
-| **Pull requests** | 🔀/❌ merge & close reactions (`closed`) and 🟢🟠🔵🔴 label reactions (`labeled`/`unlabeled`) |
+| **Pull requests** | 🔀/❌ merge & close reactions (`closed`) and 🟢🟠🧪⚖️ label reactions (`labeled`/`unlabeled`) |
 | **Pull request reviews** | ✅/💬 review reactions and review DMs (`submitted`/`dismissed`) |
 | **Check suites** | 🐶 failing-check reaction and check-failure DMs (`completed`) |
 

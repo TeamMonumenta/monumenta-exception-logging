@@ -138,7 +138,7 @@ def compute_desired_reactions(
             desired.add(config.reaction_changes)
             break
 
-    # Label reactions — any open PR carrying the label (🟢/🟠/🔵/🔴).
+    # Label reactions — any open PR carrying the label (🟢/🟠/🧪/⚖️).
     # Drop off naturally once the message is terminal (open_prs empty).
     for p in open_prs:
         for category in _parse_label_categories(p.labels):

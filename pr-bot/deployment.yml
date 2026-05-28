@@ -76,8 +76,6 @@ spec:
           value: "TeamMonumenta/monumenta-plugins,TeamMonumenta/monumenta-server-management,TeamMonumenta/monumenta-mixins,TeamMonumenta/library-of-souls,TeamMonumenta/scripted-quests,TeamMonumenta/monumenta-automation"
         - name: REACTION_MERGED
           value: "merged:1050492627692294204"
-        - name: REACTION_TESTED
-          value: "blue_check:478529965676036096"
         - name: DISCORD_TOKEN
           valueFrom:
             secretKeyRef:
