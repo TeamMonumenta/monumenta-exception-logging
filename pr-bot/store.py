@@ -41,6 +41,13 @@ class PrLink:
     pr_number: int
 
 
+@dataclass
+class GithubLinkRow:
+    discord_user_id: str
+    github_username: str   # stored as the user typed it; comparisons are NOCASE
+    linked_at: int
+
+
 def _row_to_message(row: sqlite3.Row) -> MessageRow:
     return MessageRow(
         message_id=str(row["message_id"]),
@@ -50,6 +57,14 @@ def _row_to_message(row: sqlite3.Row) -> MessageRow:
         created_at=int(row["created_at"]),
         has_links=bool(row["has_links"]),
         done=bool(row["done"]),
+    )
+
+
+def _row_to_github_link(row: sqlite3.Row) -> GithubLinkRow:
+    return GithubLinkRow(
+        discord_user_id=str(row["discord_user_id"]),
+        github_username=str(row["github_username"]),
+        linked_at=int(row["linked_at"]),
     )
 
 
@@ -169,6 +184,25 @@ class Store:
 
     def set_notify_pref(self, discord_user_id: str, pref: str) -> None:
         _db.set_notify_pref(self._conn, discord_user_id, pref)
+
+    # ── github_links ─────────────────────────────────────────────────────────
+
+    def add_github_link(self, discord_user_id: str, github_username: str) -> None:
+        _db.add_github_link(self._conn, discord_user_id, github_username)
+
+    def remove_github_link(self, discord_user_id: str) -> bool:
+        return _db.remove_github_link(self._conn, discord_user_id) > 0
+
+    def get_link_by_discord(self, discord_user_id: str) -> Optional[GithubLinkRow]:
+        row = _db.get_link_by_discord(self._conn, discord_user_id)
+        return _row_to_github_link(row) if row else None
+
+    def get_link_by_github(self, github_username: str) -> Optional[GithubLinkRow]:
+        row = _db.get_link_by_github(self._conn, github_username)
+        return _row_to_github_link(row) if row else None
+
+    def list_github_links(self) -> list[GithubLinkRow]:
+        return [_row_to_github_link(r) for r in _db.list_github_links(self._conn)]
 
     # ── aggregate helpers ─────────────────────────────────────────────────────
 

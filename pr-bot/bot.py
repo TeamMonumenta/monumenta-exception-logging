@@ -2,6 +2,8 @@
 # Copyright (C) 2026 Byron Marohn
 import asyncio
 import logging
+import re
+import sqlite3
 import time
 from typing import Any, Optional
 
@@ -19,9 +21,12 @@ from github import (
     ReviewEvent,
     WebhookEvent,
     match_label_categories,
+    parse_autopost_message,
     parse_pr_links,
 )
 from store import PrLink, PrRow, Store
+
+_GITHUB_USERNAME_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})")
 
 logger = logging.getLogger(__name__)
 
@@ -652,9 +657,18 @@ class PrBot(commands.Bot):
                     await self._dm_user(author_id, text)
 
     async def _handle_label_event(self, event: LabelEvent) -> None:
-        """Apply a labeled/unlabeled event (full label set) and reconcile. No DM."""
+        """Apply a labeled/unlabeled/opened event (full label set) and reconcile.
+
+        Also runs the auto-post path: if the PR has the 'ready' label, isn't
+        already tracked by any message, and its author has linked a Discord
+        identity via /pr_linkaccount, the bot posts the PR link itself.
+        No DM.
+        """
         repo = event.repo
         pr_number = event.pr_number
+
+        await self._maybe_autopost_ready_pr(event)
+
         categories = match_label_categories(event.label_names, self.config.label_map())
         new_labels = _join_label_categories(categories)
 
@@ -673,6 +687,79 @@ class PrBot(commands.Bot):
             if msg.done:
                 continue
             await self.reconcile_message(msg.message_id)
+
+    async def _maybe_autopost_ready_pr(  # pylint: disable=too-many-return-statements
+        self, event: LabelEvent,
+    ) -> None:
+        """If the PR is ready, untracked, and the author is linked, post its link."""
+        if not self.config.autopost_ready_prs:
+            return
+        repo = event.repo
+        pr_number = event.pr_number
+        if repo not in self.config.github_repos:
+            return
+        categories = match_label_categories(event.label_names, self.config.label_map())
+        if "ready" not in categories:
+            return
+        # "Not already tracked" covers human-posted messages and any prior auto-post.
+        if self.store.get_messages_for_pr(repo, pr_number):
+            logger.debug(
+                "autopost %s#%d: PR is already tracked by a message; skipping",
+                repo, pr_number,
+            )
+            return
+
+        pr_author = event.pr_author or ""
+        if not pr_author:
+            # 'labeled' payloads always carry user.login, but fall back to a REST
+            # fetch if a future webhook shape omits it.
+            try:
+                state = await self.github.fetch_pr_state(repo, pr_number)
+                pr_author = str(state.get("pr_author") or "")
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("autopost %s#%d: PR author fetch failed", repo, pr_number)
+                return
+        if not pr_author:
+            logger.debug("autopost %s#%d: PR author unknown; skipping", repo, pr_number)
+            return
+
+        link = self.store.get_link_by_github(pr_author)
+        if link is None:
+            logger.debug(
+                "autopost %s#%d: GitHub user %r has no /pr_linkaccount; skipping",
+                repo, pr_number, pr_author,
+            )
+            return
+
+        channel = await self._get_channel()
+        if channel is None:
+            return
+        content = (
+            f"<@{link.discord_user_id}> | `{pr_author}` opened a pull request:\n"
+            f"https://github.com/{repo}/pull/{pr_number}"
+        )
+        try:
+            posted = await channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
+            )
+        except discord.DiscordException:
+            logger.exception(
+                "autopost %s#%d: failed to send message", repo, pr_number,
+            )
+            return
+        logger.info(
+            "Auto-posted ready PR %s#%d as message %s (discord=%s, gh=%s)",
+            repo, pr_number, posted.id, link.discord_user_id, pr_author,
+        )
+        await self.ingest_message(
+            message_id=str(posted.id),
+            channel_id=str(posted.channel.id),
+            guild_id=str(posted.guild.id) if posted.guild else None,
+            author_id=link.discord_user_id,
+            created_at=int(posted.created_at.timestamp()),
+            content=content,
+        )
 
     async def _handle_check_event(self, event: CheckEvent) -> None:
         """Re-aggregate check status for each associated PR; reconcile and DM on failure."""
@@ -900,8 +987,15 @@ class PrBot(commands.Bot):
         async for message in channel.history(limit=None, oldest_first=True):
             if int(message.created_at.timestamp()) < cutoff:
                 continue
+            # Bot-authored messages are normally skipped, but auto-post messages
+            # need to be re-ingested with the original poster's discord_user_id
+            # as author_id so DMs go to the human, not the bot.
+            override_author_id: Optional[str] = None
             if self.user and message.author.id == self.user.id:
-                continue
+                parsed = parse_autopost_message(message.content)
+                if parsed is None:
+                    continue
+                override_author_id = parsed.discord_user_id
             msg_id = str(message.id)
             if msg_id not in tracked_ids or msg_id in no_link_ids:
                 if msg_id not in tracked_ids:
@@ -910,11 +1004,12 @@ class PrBot(commands.Bot):
                 else:
                     logger.debug("Re-checking no-link message %s (config may have changed)", message.id)
                 guild_id = str(message.guild.id) if message.guild else None
+                author_id = override_author_id or str(message.author.id)
                 await self.ingest_message(
                     message_id=msg_id,
                     channel_id=str(message.channel.id),
                     guild_id=guild_id,
-                    author_id=str(message.author.id),
+                    author_id=author_id,
                     created_at=int(message.created_at.timestamp()),
                     content=message.content,
                     extra_links=await self._resolve_reply_links(message),
@@ -1072,6 +1167,65 @@ class PrBot(commands.Bot):
                 await interaction.response.send_message("\n".join(lines), ephemeral=True)
             else:
                 await interaction.response.send_message("No repos configured.", ephemeral=True)
+
+        link_group = app_commands.Group(
+            name="pr_linkaccount",
+            description="Link your Discord identity to a GitHub username for PR auto-posts",
+        )
+
+        @link_group.command(name="add", description="Link your Discord account to a GitHub username")
+        @app_commands.describe(github_username="Your GitHub login (case-insensitive)")
+        async def link_add(
+            interaction: discord.Interaction, github_username: str,
+        ) -> None:
+            gh = github_username.strip()
+            logger.info("/pr_linkaccount add by %s -> %r", interaction.user, gh)
+            if not gh or not _GITHUB_USERNAME_RE.fullmatch(gh):
+                await interaction.response.send_message(
+                    "Not a valid GitHub username.", ephemeral=True,
+                )
+                return
+            try:
+                self.store.add_github_link(str(interaction.user.id), gh)
+            except sqlite3.IntegrityError:
+                await interaction.response.send_message(
+                    f"`{gh}` is already linked to another Discord user.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                f"Linked your Discord account to GitHub user `{gh}`.",
+                ephemeral=True,
+            )
+
+        @link_group.command(name="remove", description="Remove your Discord ↔ GitHub link")
+        async def link_remove(interaction: discord.Interaction) -> None:
+            logger.info("/pr_linkaccount remove by %s", interaction.user)
+            removed = self.store.remove_github_link(str(interaction.user.id))
+            await interaction.response.send_message(
+                "Link removed." if removed else "You have no link to remove.",
+                ephemeral=True,
+            )
+
+        @link_group.command(name="list", description="List all Discord ↔ GitHub links")
+        async def link_list(interaction: discord.Interaction) -> None:
+            logger.debug("/pr_linkaccount list by %s", interaction.user)
+            rows = self.store.list_github_links()
+            if not rows:
+                await interaction.response.send_message(
+                    "No links registered.", ephemeral=True,
+                )
+                return
+            lines = ["**Registered links:**"] + [
+                f"- <@{r.discord_user_id}> ↔ `{r.github_username}`" for r in rows
+            ]
+            await interaction.response.send_message(
+                "\n".join(lines),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+
+        self.tree.add_command(link_group)
 
 
 # ── utilities ─────────────────────────────────────────────────────────────────

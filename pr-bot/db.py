@@ -59,6 +59,14 @@ def _create_tables(conn: sqlite3.Connection) -> None:
                             CHECK (pref IN ('off','review_comments','any_review','all')),
             updated_at      INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS github_links (
+            discord_user_id TEXT PRIMARY KEY,
+            github_username TEXT NOT NULL,
+            linked_at       INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_github_links_user
+            ON github_links(github_username COLLATE NOCASE);
     """)
 
 
@@ -267,3 +275,54 @@ def set_notify_pref(
             """,
             (discord_user_id, pref, int(time.time())),
         )
+
+
+# ── github_links ─────────────────────────────────────────────────────────────
+
+def add_github_link(
+    conn: sqlite3.Connection, discord_user_id: str, github_username: str
+) -> None:
+    """Insert or replace a discord→github link. Stores the username verbatim;
+    the unique index uses COLLATE NOCASE so re-claims by different casing collide."""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO github_links (discord_user_id, github_username, linked_at)
+            VALUES (?,?,?)
+            ON CONFLICT(discord_user_id) DO UPDATE SET
+                github_username=excluded.github_username,
+                linked_at=excluded.linked_at
+            """,
+            (discord_user_id, github_username, int(time.time())),
+        )
+
+
+def remove_github_link(conn: sqlite3.Connection, discord_user_id: str) -> int:
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM github_links WHERE discord_user_id=?", (discord_user_id,)
+        )
+    return cur.rowcount
+
+
+def get_link_by_discord(
+    conn: sqlite3.Connection, discord_user_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM github_links WHERE discord_user_id=?", (discord_user_id,)
+    ).fetchone()
+
+
+def get_link_by_github(
+    conn: sqlite3.Connection, github_username: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM github_links WHERE github_username = ? COLLATE NOCASE",
+        (github_username,),
+    ).fetchone()
+
+
+def list_github_links(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM github_links ORDER BY github_username COLLATE NOCASE"
+    ).fetchall()

@@ -42,6 +42,33 @@ def parse_pr_links(content: str, configured_repos: list[str]) -> list[ParsedPrLi
     return result
 
 
+# ── autopost message parsing ──────────────────────────────────────────────────
+
+# Recognizes the bot's own auto-post message format so startup_reconcile can
+# rebuild tracking rows after a DB wipe. `<@!?\d+>` covers both the modern
+# `<@123>` and legacy nickname-mention `<@!123>` forms.
+_AUTOPOST_RE = re.compile(
+    r"<@!?(?P<uid>\d+)>\s*\|\s*`(?P<gh>[^`]+)`\s+opened a pull request:",
+)
+
+
+@dataclass
+class ParsedAutopost:
+    discord_user_id: str
+    github_username: str
+
+
+def parse_autopost_message(content: str) -> Optional[ParsedAutopost]:
+    """Return the (discord_user_id, github_username) embedded in a bot auto-post,
+    or None if the content doesn't match the auto-post format."""
+    m = _AUTOPOST_RE.search(content)
+    if not m:
+        return None
+    return ParsedAutopost(
+        discord_user_id=m.group("uid"), github_username=m.group("gh")
+    )
+
+
 # ── label matching ─────────────────────────────────────────────────────────────
 
 def match_label_categories(
@@ -118,6 +145,7 @@ class LabelEvent:
     repo: str
     pr_number: int
     label_names: list[str]   # full current label set on the PR (raw names)
+    pr_author: Optional[str] = None   # GitHub login from the webhook payload
 
 
 @dataclass
@@ -152,13 +180,18 @@ def _parse_pull_request_event(
     pr = payload.get("pull_request", {})
     repo_full = str(payload.get("repository", {}).get("full_name", "")).lower()
 
-    if action in ("labeled", "unlabeled"):
+    # 'opened' is included so a PR opened with the ready label already attached
+    # flows through the same auto-post path as a later label add. GitHub fires
+    # 'opened' (not 'labeled') for that case.
+    if action in ("labeled", "unlabeled", "opened"):
         # The payload carries the full current label set — recompute from scratch.
         label_names = [
             str(lab.get("name", "")) for lab in pr.get("labels", []) if lab.get("name")
         ]
+        pr_author = str(pr.get("user", {}).get("login", "")) or None
         return LabelEvent(
-            repo=repo_full, pr_number=int(pr.get("number", 0)), label_names=label_names
+            repo=repo_full, pr_number=int(pr.get("number", 0)),
+            label_names=label_names, pr_author=pr_author,
         )
 
     if action != "closed":

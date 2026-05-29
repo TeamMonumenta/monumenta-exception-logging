@@ -22,6 +22,10 @@ A Discord bot that keeps `#pending-prs` reactions in sync with GitHub pull reque
 - 🐶 when any GitHub Actions check is **failing** on an open linked PR; removed once all pass
 - DMs the message poster when their PR is reviewed or merged (configurable per-user with
   `/pr_notify`), and on a failing check (for any `/pr_notify` level except `off`)
+- **Auto-posts** a PR link in the channel when a tracked-repo PR enters the `ready`
+  state (label added, or opened with the label) and the author has linked their
+  Discord ↔ GitHub identity via `/pr_linkaccount add`. Skipped if any message in
+  the channel already tracks that PR.
 
 ## Quick start
 
@@ -65,6 +69,7 @@ python server.py
 | `REACTION_TESTED` | `🧪` | | Reaction for the `Tested` label. Override with Unicode or `name:id` |
 | `REACTION_MONTHLY_BALANCE` | `⚖️` | | Reaction for the `monthly-balance` label. Override with Unicode or `name:id` |
 | `REACTION_CHECKS_FAILED` | `🐶` | | Reaction when an automated check is failing on an open PR. Override with Unicode or `name:id` |
+| `AUTOPOST_READY_PRS` | `true` | | When a tracked-repo PR enters the `ready` state and the author has linked their account via `/pr_linkaccount add`, the bot posts the PR link in the channel (unless some message already tracks the PR). Set to `false` to disable. |
 | `VERBOSE` | `true` | | Logging verbosity. Any value other than `false` (case-insensitive) raises the bot's own log level to `DEBUG`; `false` keeps it at `INFO` (see [Logging](#logging)) |
 
 ## Logging
@@ -92,6 +97,9 @@ floods the log even in verbose mode.
 | `/pr_status <message>` | Show tracked PRs and their state for a message |
 | `/pr_resync <message>` | Force-reprocess a message (re-parse links, re-fetch state, re-reconcile) |
 | `/pr_repos` | List configured repos |
+| `/pr_linkaccount add <github_username>` | Link your Discord account to your GitHub login (case-insensitive). Required for the bot to auto-post your ready PRs. |
+| `/pr_linkaccount remove` | Remove your Discord ↔ GitHub link. |
+| `/pr_linkaccount list` | Show all registered Discord ↔ GitHub links (ephemeral). |
 
 ## Deploy
 
@@ -156,7 +164,7 @@ Register a GitHub webhook (org-level recommended) at `https://pr-bot.playmonumen
 
 | Event | Drives |
 |---|---|
-| **Pull requests** | 🔀/❌ merge & close reactions (`closed`) and 🟢🟠🧪⚖️ label reactions (`labeled`/`unlabeled`) |
+| **Pull requests** | 🔀/❌ merge & close reactions (`closed`), 🟢🟠🧪⚖️ label reactions (`labeled`/`unlabeled`), and ready-PR auto-post (`opened`/`labeled`) |
 | **Pull request reviews** | ✅/💬 review reactions and review DMs (`submitted`/`dismissed`) |
 | **Check suites** | 🐶 failing-check reaction and check-failure DMs (`completed`) |
 
@@ -166,4 +174,5 @@ succeeds.
 ## Discord Developer Portal setup
 
 Enable the **Message Content** privileged intent in the portal for your application.
-Grant the bot **Add Reactions**, **Read Message History**, and (recommended) **Manage Messages** in `#pending-prs`.
+Grant the bot **Send Messages** (required for the ready-PR auto-post), **Add Reactions**,
+**Read Message History**, and (recommended) **Manage Messages** in `#pending-prs`.

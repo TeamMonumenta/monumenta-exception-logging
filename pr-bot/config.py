@@ -33,6 +33,10 @@ class PrBotConfig:
     reaction_monthly_balance: str = "⚖️"
     # Automated-check status reaction (🐶 when any check is failing).
     reaction_checks_failed: str = "🐶"
+    # When True, the bot posts its own message in #pending-prs whenever a
+    # tracked-repo PR enters the 'ready' state (label added or opened-with-label)
+    # and its author has linked a Discord identity via /pr_linkaccount.
+    autopost_ready_prs: bool = True
     verbose: bool = True
 
     def label_map(self) -> dict[str, str]:
@@ -72,6 +76,9 @@ def from_env() -> PrBotConfig:
     review_comment_is_changes = (
         os.environ.get("REVIEW_COMMENT_IS_CHANGES", "true").lower() not in ("false", "0", "no")
     )
+    autopost_ready_prs = (
+        os.environ.get("AUTOPOST_READY_PRS", "true").lower() not in ("false", "0", "no")
+    )
     # VERBOSE is on unless explicitly set to "false" (case-insensitive); any other
     # value (including unset) enables verbose logging.
     verbose = os.environ.get("VERBOSE", "true").lower() != "false"
@@ -102,5 +109,6 @@ def from_env() -> PrBotConfig:
         reaction_tested=os.environ.get("REACTION_TESTED", "🧪"),
         reaction_monthly_balance=os.environ.get("REACTION_MONTHLY_BALANCE", "⚖️"),
         reaction_checks_failed=os.environ.get("REACTION_CHECKS_FAILED", "🐶"),
+        autopost_ready_prs=autopost_ready_prs,
         verbose=verbose,
     )
