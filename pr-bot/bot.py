@@ -710,12 +710,14 @@ class PrBot(commands.Bot):
             return
 
         pr_author = event.pr_author or ""
+        pr_title = event.pr_title or ""
         if not pr_author:
             # 'labeled' payloads always carry user.login, but fall back to a REST
             # fetch if a future webhook shape omits it.
             try:
                 state = await self.github.fetch_pr_state(repo, pr_number)
                 pr_author = str(state.get("pr_author") or "")
+                pr_title = str(state.get("title") or "")
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception("autopost %s#%d: PR author fetch failed", repo, pr_number)
                 return
@@ -734,8 +736,10 @@ class PrBot(commands.Bot):
         channel = await self._get_channel()
         if channel is None:
             return
+        title_line = f"{pr_title}\n" if pr_title else ""
         content = (
             f"<@{link.discord_user_id}> | `{pr_author}` opened a pull request:\n"
+            f"{title_line}"
             f"https://github.com/{repo}/pull/{pr_number}"
         )
         try:

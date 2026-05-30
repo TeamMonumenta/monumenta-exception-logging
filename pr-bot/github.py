@@ -146,6 +146,7 @@ class LabelEvent:
     pr_number: int
     label_names: list[str]   # full current label set on the PR (raw names)
     pr_author: Optional[str] = None   # GitHub login from the webhook payload
+    pr_title: Optional[str] = None    # PR title from the webhook payload
 
 
 @dataclass
@@ -189,9 +190,10 @@ def _parse_pull_request_event(
             str(lab.get("name", "")) for lab in pr.get("labels", []) if lab.get("name")
         ]
         pr_author = str(pr.get("user", {}).get("login", "")) or None
+        pr_title = str(pr.get("title", "")) or None
         return LabelEvent(
             repo=repo_full, pr_number=int(pr.get("number", 0)),
-            label_names=label_names, pr_author=pr_author,
+            label_names=label_names, pr_author=pr_author, pr_title=pr_title,
         )
 
     if action != "closed":
@@ -349,6 +351,7 @@ class GitHubClient:
             "merged_by": merged_by,
             "closed_by": None,  # closed-not-merged has no closer field in the REST API
             "pr_author": pr_author,
+            "title": str(pr_data.get("title", "")),
             "labels": labels,
             "checks_failing": checks_failing,
         }
