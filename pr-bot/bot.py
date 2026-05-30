@@ -207,7 +207,8 @@ def _format_dm(
     transition: str,
     actor: str,
 ) -> str:
-    pr_ref = f"{repo}#{pr_number}"
+    url = f"https://github.com/{repo}/pull/{pr_number}"
+    pr_ref = f"[{repo}#{pr_number}]({url})"
     if transition == "approved":
         emoji = config.reaction_approved
         verb = "**approved**"
@@ -224,8 +225,7 @@ def _format_dm(
         return f"{emoji} Your PR {pr_ref} was **merged** by @{actor}"
     if transition == "checks_failed":
         emoji = config.reaction_checks_failed
-        url = f"https://github.com/{repo}/pull/{pr_number}"
-        return f"{emoji} A check **failed** on your PR {pr_ref}\n{url}"
+        return f"{emoji} A check **failed** on your PR {pr_ref}"
     # closed
     emoji = config.reaction_closed
     return f"{emoji} Your PR {pr_ref} was **closed** without merging by @{actor}"
@@ -241,6 +241,7 @@ class PrBot(commands.Bot):
         self.store = store
         self.github = github_client
         self.config = config
+        self._autoposting: set[tuple[str, int]] = set()
 
     async def setup_hook(self) -> None:
         logger.debug("setup_hook: registering and syncing slash commands")
@@ -733,8 +734,20 @@ class PrBot(commands.Bot):
             )
             return
 
+        # Guard against concurrent webhooks (e.g. "ready" + "tested" arriving back-to-back)
+        # both passing the get_messages_for_pr check before either post is ingested.
+        guard_key = (repo, pr_number)
+        if guard_key in self._autoposting:
+            logger.debug(
+                "autopost %s#%d: autopost already in progress; skipping duplicate",
+                repo, pr_number,
+            )
+            return
+        self._autoposting.add(guard_key)
+
         channel = await self._get_channel()
         if channel is None:
+            self._autoposting.discard(guard_key)
             return
         title_line = f"{pr_title}\n" if pr_title else ""
         content = (
@@ -751,6 +764,7 @@ class PrBot(commands.Bot):
             logger.exception(
                 "autopost %s#%d: failed to send message", repo, pr_number,
             )
+            self._autoposting.discard(guard_key)
             return
         logger.info(
             "Auto-posted ready PR %s#%d as message %s (discord=%s, gh=%s)",
@@ -764,6 +778,7 @@ class PrBot(commands.Bot):
             created_at=int(posted.created_at.timestamp()),
             content=content,
         )
+        self._autoposting.discard(guard_key)
 
     async def _handle_check_event(self, event: CheckEvent) -> None:
         """Re-aggregate check status for each associated PR; reconcile and DM on failure."""
