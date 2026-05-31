@@ -32,6 +32,34 @@ logger = logging.getLogger(__name__)
 
 _MAX_MSG_LEN = 2000
 
+
+def _chunk_lines(lines: list[str], limit: int = _MAX_MSG_LEN) -> list[str]:
+    """Split lines into chunks that each fit within *limit* characters."""
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        if len(line) <= limit:
+            parts = [line]
+        else:
+            parts_: list[str] = []
+            for i in range(0, len(line), limit):
+                parts_.append(line[i: i + limit])
+            parts = parts_
+        for part in parts:
+            needed = len(part) + (1 if current else 0)
+            if current_len + needed > limit:
+                chunks.append("\n".join(current))
+                current = [part]
+                current_len = len(part)
+            else:
+                current.append(part)
+                current_len += needed
+    if current:
+        chunks.append("\n".join(current))
+    return chunks if chunks else ["(no results)"]
+
+
 # ── emoji helpers ─────────────────────────────────────────────────────────────
 
 def _emoji_matches(reaction: discord.Reaction, configured: str) -> bool:
@@ -111,6 +139,7 @@ def _apply_review_event(
         labels=pr.labels,
         checks_failing=pr.checks_failing,
         updated_at=int(time.time()),
+        title=pr.title,
     )
 
 
@@ -229,6 +258,43 @@ def _format_dm(
     # closed
     emoji = config.reaction_closed
     return f"{emoji} Your PR {pr_ref} was **closed** without merging by @{actor}"
+
+
+# ── /pr_summary helpers ───────────────────────────────────────────────────────
+
+def _pr_sort_key(pr: PrRow) -> tuple[int, int, int]:
+    # approved first (merge candidates), then no-review/commented (reviewers can act),
+    # then changes_requested last (waiting on author — least actionable for reviewers)
+    review_order = {"approved": 0, "none": 1, "commented": 1, "changes_requested": 2}
+    cats = _parse_label_categories(pr.labels)
+    return (
+        review_order.get(pr.review_status, 1),
+        0 if "tested" in cats else 1,
+        1 if pr.checks_failing else 0,
+    )
+
+
+def _pr_summary_line(pr: PrRow, author_id: Optional[str], config: PrBotConfig) -> str:
+    """Format one PR entry: - {emojis} | <@author> | [title or repo#N](url)"""
+    cats = _parse_label_categories(pr.labels)
+    emojis: list[str] = []
+    if "monthly_balance" in cats:
+        emojis.append(config.reaction_monthly_balance)
+    emojis.append(config.reaction_ready)
+    if pr.review_status == "approved":
+        emojis.append(config.reaction_approved)
+    elif pr.review_status == "changes_requested":
+        emojis.append(config.reaction_changes)
+    if "tested" in cats:
+        emojis.append(config.reaction_tested)
+    if pr.checks_failing:
+        emojis.append(config.reaction_checks_failed)
+    emoji_str = "".join(emojis)
+
+    author_str = f"<@{author_id}>" if author_id else "unknown"
+    url = f"https://github.com/{pr.repo}/pull/{pr.pr_number}"
+    link_text = pr.title if pr.title else f"{pr.repo}#{pr.pr_number}"
+    return f"- {emoji_str} | {author_str} | [{link_text}]({url})"
 
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
@@ -364,11 +430,16 @@ class PrBot(commands.Bot):
         pr_links = [PrLink(repo=lnk.repo, pr_number=lnk.pr_number) for lnk in links]
         self.store.set_links_for_message(message_id, pr_links)
 
-        # Fetch state for any PR we haven't seen yet
+        # Fetch state for any PR we haven't seen yet, or that's missing its title
         if fetch_pr_state:
             for lnk in links:
-                if self.store.get_pr(lnk.repo, lnk.pr_number) is None:
+                pr = self.store.get_pr(lnk.repo, lnk.pr_number)
+                if pr is None:
                     await self._fetch_and_store_pr(lnk.repo, lnk.pr_number)
+                elif pr.title is None:
+                    title = await self.github.fetch_pr_title(lnk.repo, lnk.pr_number)
+                    if title:
+                        self.store.set_pr_title(lnk.repo, lnk.pr_number, title)
 
         await self.reconcile_message(message_id)
 
@@ -392,6 +463,7 @@ class PrBot(commands.Bot):
                 last_reviewer=state.get("last_reviewer"),  # type: ignore[arg-type]
                 merged_by=state.get("merged_by"),  # type: ignore[arg-type]
                 closed_by=state.get("closed_by"),  # type: ignore[arg-type]
+                title=str(state["title"]) if state.get("title") else None,
             )
             categories = match_label_categories(
                 list(state.get("labels", [])), self.config.label_map()
@@ -565,6 +637,7 @@ class PrBot(commands.Bot):
                     last_reviewer=None, merged_by=None, closed_by=None,
                     labels="", checks_failing=False,
                     updated_at=None,
+                    title=None,
                 )
             updated = _apply_review_event(
                 existing, event.action, event.review_state,
@@ -684,6 +757,8 @@ class PrBot(commands.Bot):
             repo, pr_number, old_labels or "none", new_labels or "none",
         )
         self.store.set_pr_labels(repo, pr_number, new_labels)
+        if event.pr_title:
+            self.store.set_pr_title(repo, pr_number, event.pr_title)
         for msg in self.store.get_messages_for_pr(repo, pr_number):
             if msg.done:
                 continue
@@ -940,6 +1015,7 @@ class PrBot(commands.Bot):
             last_reviewer=state.get("last_reviewer"),  # type: ignore[arg-type]
             merged_by=state.get("merged_by"),  # type: ignore[arg-type]
             closed_by=state.get("closed_by"),  # type: ignore[arg-type]
+            title=str(state["title"]) if state.get("title") else None,
         )
         self.store.set_pr_labels(pr.repo, pr.pr_number, new_labels)
         if checks_known:
@@ -1130,8 +1206,9 @@ class PrBot(commands.Bot):
                     extra = f", labels={pr.labels}" if pr.labels else ""
                     if pr.checks_failing:
                         extra += ", checks=FAILING"
+                    title_str = f' "{pr.title}"' if pr.title else ""
                     lines.append(
-                        f"  {lnk.repo}#{lnk.pr_number}: "
+                        f"  {lnk.repo}#{lnk.pr_number}{title_str}: "
                         f"review={pr.review_status}, {terminal}{extra}"
                     )
                 else:
@@ -1245,6 +1322,66 @@ class PrBot(commands.Bot):
             )
 
         self.tree.add_command(link_group)
+
+        @self.tree.command(
+            name="pr_summary",
+            description="List all ready PRs grouped by non-balance / balance",
+        )
+        async def pr_summary(interaction: discord.Interaction) -> None:
+            logger.debug("/pr_summary by %s", interaction.user)
+            await interaction.response.defer(ephemeral=True)
+            prs = self.store.get_ready_prs()
+            if not prs:
+                await interaction.followup.send("No ready PRs found.", ephemeral=True)
+                return
+            # Fetch titles for any PR that doesn't have one yet (e.g. PRs that
+            # entered the DB via webhook before title storage was added).
+            missing_title = [p for p in prs if p.title is None]
+            if missing_title:
+                fetched = await asyncio.gather(
+                    *[self.github.fetch_pr_title(p.repo, p.pr_number) for p in missing_title],
+                    return_exceptions=True,
+                )
+                updated: dict[tuple[str, int], str] = {}
+                for p, result in zip(missing_title, fetched):
+                    if isinstance(result, str) and result:
+                        self.store.set_pr_title(p.repo, p.pr_number, result)
+                        updated[(p.repo, p.pr_number)] = result
+                # Rebuild prs list with freshly fetched titles applied
+                if updated:
+                    prs = [
+                        PrRow(**{**p.__dict__, "title": updated.get((p.repo, p.pr_number), p.title)})
+                        for p in prs
+                    ]
+            cats = _parse_label_categories
+            balance = sorted(
+                [p for p in prs if "monthly_balance" in cats(p.labels)],
+                key=_pr_sort_key,
+            )
+            non_balance = sorted(
+                [p for p in prs if "monthly_balance" not in cats(p.labels)],
+                key=_pr_sort_key,
+            )
+            lines: list[str] = []
+            if non_balance:
+                lines.append("__Non-balance__")
+                for p in non_balance:
+                    author_id = self.store.get_first_author_for_pr(p.repo, p.pr_number)
+                    lines.append(_pr_summary_line(p, author_id, self.config))
+            if balance:
+                if non_balance:
+                    lines.append("")
+                lines.append("__Balance__")
+                for p in balance:
+                    author_id = self.store.get_first_author_for_pr(p.repo, p.pr_number)
+                    lines.append(_pr_summary_line(p, author_id, self.config))
+            chunks = _chunk_lines(lines)
+            for chunk in chunks:
+                await interaction.followup.send(
+                    chunk,
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
 
 
 # ── utilities ─────────────────────────────────────────────────────────────────

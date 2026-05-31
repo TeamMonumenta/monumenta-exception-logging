@@ -50,6 +50,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             labels         TEXT NOT NULL DEFAULT '',
             checks_failing INTEGER NOT NULL DEFAULT 0,
             updated_at     INTEGER,
+            title          TEXT,
             PRIMARY KEY (repo, pr_number)
         );
 
@@ -68,6 +69,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS idx_github_links_user
             ON github_links(github_username COLLATE NOCASE);
     """)
+    # Migrate existing DBs that predate the title column.
+    try:
+        conn.execute("ALTER TABLE prs ADD COLUMN title TEXT")
+    except sqlite3.OperationalError:
+        pass  # already exists
 
 
 # ── messages ──────────────────────────────────────────────────────────────────
@@ -177,13 +183,14 @@ def upsert_pr(
     last_reviewer: Optional[str] = None,
     merged_by: Optional[str] = None,
     closed_by: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> None:
     with conn:
         conn.execute(
             """
             INSERT INTO prs (repo, pr_number, review_status, merged, closed,
-                             last_reviewer, merged_by, closed_by, updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?)
+                             last_reviewer, merged_by, closed_by, updated_at, title)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(repo, pr_number) DO UPDATE SET
                 review_status=excluded.review_status,
                 merged=excluded.merged,
@@ -191,10 +198,11 @@ def upsert_pr(
                 last_reviewer=excluded.last_reviewer,
                 merged_by=excluded.merged_by,
                 closed_by=excluded.closed_by,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                title=COALESCE(excluded.title, prs.title)
             """,
             (repo, pr_number, review_status, merged, closed,
-             last_reviewer, merged_by, closed_by, int(time.time())),
+             last_reviewer, merged_by, closed_by, int(time.time()), title),
         )
 
 
@@ -226,6 +234,49 @@ def set_pr_checks_failing(
             """,
             (repo, pr_number, checks_failing, int(time.time())),
         )
+
+
+def set_pr_title(conn: sqlite3.Connection, repo: str, pr_number: int, title: str) -> None:
+    """Set only the title column, preserving all other state."""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO prs (repo, pr_number, title, updated_at)
+            VALUES (?,?,?,?)
+            ON CONFLICT(repo, pr_number) DO UPDATE SET
+                title=excluded.title, updated_at=excluded.updated_at
+            """,
+            (repo, pr_number, title, int(time.time())),
+        )
+
+
+def get_ready_prs(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return open PRs with the 'ready' label category that have at least one non-done message."""
+    return conn.execute(
+        """
+        SELECT DISTINCT p.* FROM prs p
+        JOIN pr_links l ON l.repo=p.repo AND l.pr_number=p.pr_number
+        JOIN messages m ON m.message_id=l.message_id
+        WHERE m.done=0 AND p.merged=0 AND p.closed=0
+          AND (',' || p.labels || ',') LIKE '%,ready,%'
+        """
+    ).fetchall()
+
+
+def get_first_author_for_pr(
+    conn: sqlite3.Connection, repo: str, pr_number: int
+) -> Optional[str]:
+    """Return the author_id of the earliest message linked to this PR, or None."""
+    row = conn.execute(
+        """
+        SELECT m.author_id FROM messages m
+        JOIN pr_links l ON l.message_id=m.message_id
+        WHERE l.repo=? AND l.pr_number=?
+        ORDER BY m.created_at ASC LIMIT 1
+        """,
+        (repo, pr_number),
+    ).fetchone()
+    return str(row["author_id"]) if row else None
 
 
 def get_active_prs(conn: sqlite3.Connection) -> list[sqlite3.Row]:

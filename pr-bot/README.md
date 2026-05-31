@@ -97,6 +97,7 @@ floods the log even in verbose mode.
 | `/pr_status <message>` | Show tracked PRs and their state for a message |
 | `/pr_resync <message>` | Force-reprocess a message (re-parse links, re-fetch state, re-reconcile) |
 | `/pr_repos` | List configured repos |
+| `/pr_summary` | List all open ready PRs |
 | `/pr_linkaccount add <github_username>` | Link your Discord account to your GitHub login (case-insensitive). Required for the bot to auto-post your ready PRs. |
 | `/pr_linkaccount remove` | Remove your Discord ↔ GitHub link. |
 | `/pr_linkaccount list` | Show all registered Discord ↔ GitHub links (ephemeral). |

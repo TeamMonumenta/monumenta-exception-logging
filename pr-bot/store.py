@@ -33,6 +33,7 @@ class PrRow:
     labels: str          # comma-separated sorted category keys, e.g. "ready,tested"
     checks_failing: bool
     updated_at: Optional[int]
+    title: Optional[str]
 
 
 @dataclass
@@ -81,6 +82,7 @@ def _row_to_pr(row: sqlite3.Row) -> PrRow:
         labels=str(row["labels"]) if row["labels"] else "",
         checks_failing=bool(row["checks_failing"]),
         updated_at=int(row["updated_at"]) if row["updated_at"] else None,
+        title=str(row["title"]) if row["title"] else None,
     )
 
 
@@ -154,10 +156,12 @@ class Store:
         last_reviewer: Optional[str] = None,
         merged_by: Optional[str] = None,
         closed_by: Optional[str] = None,
+        title: Optional[str] = None,
     ) -> None:
         _db.upsert_pr(
             self._conn, repo, pr_number, review_status,
             int(merged), int(closed), last_reviewer, merged_by, closed_by,
+            title=title,
         )
 
     def set_pr_labels(self, repo: str, pr_number: int, labels: str) -> None:
@@ -165,6 +169,15 @@ class Store:
 
     def set_pr_checks_failing(self, repo: str, pr_number: int, checks_failing: bool) -> None:
         _db.set_pr_checks_failing(self._conn, repo, pr_number, int(checks_failing))
+
+    def set_pr_title(self, repo: str, pr_number: int, title: str) -> None:
+        _db.set_pr_title(self._conn, repo, pr_number, title)
+
+    def get_ready_prs(self) -> list[PrRow]:
+        return [_row_to_pr(r) for r in _db.get_ready_prs(self._conn)]
+
+    def get_first_author_for_pr(self, repo: str, pr_number: int) -> Optional[str]:
+        return _db.get_first_author_for_pr(self._conn, repo, pr_number)
 
     def get_active_prs(self) -> list[PrRow]:
         rows = _db.get_active_prs(self._conn)
@@ -220,6 +233,7 @@ class Store:
                     last_reviewer=None, merged_by=None, closed_by=None,
                     labels="", checks_failing=False,
                     updated_at=int(time.time()),
+                    title=None,
                 )
             result.append(pr)
         return result

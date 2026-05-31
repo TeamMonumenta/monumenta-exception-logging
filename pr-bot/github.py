@@ -403,6 +403,18 @@ class GitHubClient:
         )
         return failing
 
+    async def fetch_pr_title(self, repo: str, pr_number: int) -> Optional[str]:
+        """Fetch just the PR title with a single API call. Returns None on failure."""
+        try:
+            async with aiohttp.ClientSession(headers=self._headers) as session:
+                pr_data: dict[str, Any] = await self._get_json(
+                    session, f"{self._BASE}/repos/{repo}/pulls/{pr_number}"
+                )
+            return str(pr_data["title"]) if pr_data.get("title") else None
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Failed to fetch title for %s#%d", repo, pr_number)
+            return None
+
     async def fetch_checks_failing(
         self, repo: str, pr_number: int
     ) -> Optional[bool]:
