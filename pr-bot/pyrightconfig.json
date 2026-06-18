@@ -4,5 +4,6 @@
   "venv": ".venv",
   "typeCheckingMode": "strict",
   "include": ["config.py", "db.py", "store.py", "github.py", "bot.py", "server.py"],
-  "reportUnusedFunction": "none"
+  "reportUnusedFunction": "none",
+  "reportUnusedVariable": "none"
 }

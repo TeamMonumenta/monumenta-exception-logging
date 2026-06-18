@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Byron Marohn
 import asyncio
+import dataclasses
 import logging
 import re
 import sqlite3
@@ -294,7 +295,7 @@ def _pr_summary_line(pr: PrRow, author_id: Optional[str], config: PrBotConfig) -
     author_str = f"<@{author_id}>" if author_id else "unknown"
     url = f"https://github.com/{pr.repo}/pull/{pr.pr_number}"
     link_text = pr.title if pr.title else f"{pr.repo}#{pr.pr_number}"
-    return f"- {emoji_str} | {author_str} | [{link_text}]({url})"
+    return f"- {emoji_str} | {author_str} | [{link_text}](<{url}>)"
 
 
 # ── Bot ───────────────────────────────────────────────────────────────────────
@@ -833,7 +834,7 @@ class PrBot(commands.Bot):
         try:
             posted = await channel.send(
                 content,
-                allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False),
+                allowed_mentions=discord.AllowedMentions(users=False, everyone=False, roles=False),
             )
         except discord.DiscordException:
             logger.exception(
@@ -1350,7 +1351,7 @@ class PrBot(commands.Bot):
                 # Rebuild prs list with freshly fetched titles applied
                 if updated:
                     prs = [
-                        PrRow(**{**p.__dict__, "title": updated.get((p.repo, p.pr_number), p.title)})
+                        dataclasses.replace(p, title=updated.get((p.repo, p.pr_number), p.title))
                         for p in prs
                     ]
             cats = _parse_label_categories
