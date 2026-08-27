@@ -94,6 +94,7 @@ bug always groups together:
 | Hyphenated UUID | `<uuid>` | `550e8400-e29b-41d4-a716-446655440000` |
 | Bare (unhyphenated) UUID | `<uuid>` | `3601df3d96f54dc1b10b8a4ebcefd210` (Mojang auth URLs) |
 | IP address | `<ip>` | `192.168.1.100` |
+| Plugin version (`git describe`) | `<version>` | `v11.80.2-1-gf114425-SNAPSHOT` |
 | Long number (>= 4 digits) | `<N>` | coordinates, entity IDs, task IDs |
 | Quoted string (single or double) | `<str>` | entity names, class names in NPE messages |
 | Bracket data | `<data>` | boss tag lists, NBT |

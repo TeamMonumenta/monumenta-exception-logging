@@ -11,6 +11,13 @@ _UUID_RE = re.compile(
 _BARE_UUID_RE = re.compile(r'\b[0-9a-f]{32}\b', re.IGNORECASE)
 _IP_RE = re.compile(r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b')
 _LONG_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{31,}')
+# Plugin versions from `git describe`, e.g. v11.80.2-1-gf114425-SNAPSHOT. A
+# git-describe or -SNAPSHOT suffix is required so plain dotted numbers (versions
+# of unrelated things, coordinates) still fall through to the number rule.
+_VERSION_RE = re.compile(
+    r'\bv?\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{4,}|-SNAPSHOT)+\b',
+    re.IGNORECASE,
+)
 _NUM_RE = re.compile(r'\d+(?:\.\d+)*')
 _WORLD_DISTANCE_RE = re.compile(
     r'(measure distance between )[-_a-z0-9<>]+( and )[-_a-z0-9<>]+',
@@ -29,6 +36,9 @@ def normalize_message(message: str) -> str:
     s = _UUID_RE.sub('<uuid>', message)
     s = _BARE_UUID_RE.sub('<uuid>', s)
     s = _IP_RE.sub('<ip>', s)
+    # Versions before the long-token and number rules so the git hash isn't
+    # fragmented into hex-digit noise (v<N>-<N>-gf<N>-SNAPSHOT).
+    s = _VERSION_RE.sub('<version>', s)
     # Long opaque tokens before number replacement so digit-heavy IDs aren't fragmented.
     s = _LONG_TOKEN_RE.sub('<id>', s)
     # Guild permission keys before number replacement so names with digits also collapse.

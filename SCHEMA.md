@@ -218,13 +218,14 @@ The fingerprint is computed by the Python ingest service from the raw event. It 
    - Hyphenated UUIDs → `<uuid>` (pattern: `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
    - Bare (unhyphenated) UUIDs → `<uuid>` (pattern: `\b[0-9a-f]{32}\b`; catches player UUIDs embedded in Mojang auth session URLs, e.g. `/profile/3601df3d96f54dc1b10b8a4ebcefd210?unsigned=false`)
    - IP addresses → `<ip>`
+   - Plugin versions → `<version>` (pattern: `\bv?\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{4,}|-SNAPSHOT)+\b`; catches `git describe` build strings like `v11.80.2-1-gf114425-SNAPSHOT`. A git-describe or `-SNAPSHOT` suffix is required, so plain dotted numbers are left to the number rule)
    - Long numbers (≥ 4 digits) → `<N>` (catches coordinates, entity IDs, counts)
    - Quoted string values → `<str>` (pattern: `'[^']{1,64}'` or `"[^"]{1,64}"`)
    - Sequences of tags/NBT-like content in brackets → `<data>`
    - Long opaque alphanumeric tokens (≥ 32 characters composed of `[A-Za-z0-9_-]`) → `<id>` (catches CDN/WAF request IDs, auth tokens, hashes, etc. — any long token that isn't a bare UUID)
    - Guild permission keys matching `guild.<name>.<role>` → `guild.<id>` (catches varying guild names like `guild.nova+.member`, `guild.lads.member`)
 
-   Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`.
+   Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`. Versions are consumed before the number rule, so the abbreviated git hash isn't fragmented into `g<N>` noise.
 3. `top_app_frames` — the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
 
 **Hash:**

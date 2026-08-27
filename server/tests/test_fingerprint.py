@@ -218,6 +218,25 @@ class TestNormalizeMessage:
                 'ab7cb32502bc45048c6a45ca7f170dad?unsigned=false due to Read timed out')
         assert normalize_message(msg1) == normalize_message(msg2)
 
+    def test_plugin_version_replaced(self):
+        # git describe version — the hex hash must not survive as digits, or two
+        # builds of the same bug would fingerprint differently.
+        msg = 'Plugin MonumentaPlugins v11.80.2-1-gf114425-SNAPSHOT failed to enable'
+        result = normalize_message(msg)
+        assert result == 'Plugin MonumentaPlugins <version> failed to enable'
+
+    def test_plugin_version_variants_replaced(self):
+        # Release build (no -SNAPSHOT), and a jar name with no leading 'v'.
+        assert normalize_message('running v11.80.2-1-gf114425') == 'running <version>'
+        assert normalize_message('MonumentaPlugins-11.80.2-1-gf114425-SNAPSHOT.jar') == \
+            'MonumentaPlugins-<version>.jar'
+        assert normalize_message('built against 1.20.4-SNAPSHOT') == 'built against <version>'
+
+    def test_plain_dotted_number_is_not_a_version(self):
+        # No git-describe/-SNAPSHOT suffix — falls through to the number rule.
+        assert normalize_message('Error at 1.20.4 with coords 12.5') == \
+            'Error at <N> with coords <N>'
+
     def test_world_distance_normalized(self):
         msg = 'Cannot measure distance between plot3769 and plot4763'
         result = normalize_message(msg)
