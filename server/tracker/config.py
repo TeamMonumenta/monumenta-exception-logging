@@ -24,6 +24,9 @@ class TrackerConfig:
     reaction_fix_success: str = "\U0001F7E2"   # 🟢
     reaction_fix_failure: str = "\U0001F534"   # 🔴
     reaction_fix_declined: str = "\U0001F7E1"  # 🟡
+    # Network API bearer tokens (see NETWORK_API.md's "Attribution" section).
+    api_token_default_ttl_hours: int = 24
+    api_token_max_ttl_hours: int = 168
 
 
 def from_env() -> TrackerConfig:
@@ -40,6 +43,8 @@ def from_env() -> TrackerConfig:
     chisel_allowed_users = [u.strip() for u in raw_allowed.split(",") if u.strip()]
     raw_purge = os.environ.get("DISCORD_PURGE_USERS", "")
     purge_allowed_users = [u.strip() for u in raw_purge.split(",") if u.strip()]
+    api_token_default_ttl_hours = int(os.environ.get("API_TOKEN_DEFAULT_TTL_HOURS", "24"))
+    api_token_max_ttl_hours = int(os.environ.get("API_TOKEN_MAX_TTL_HOURS", "168"))
     return TrackerConfig(
         db_path=db_path,
         app_packages=app_packages,
@@ -54,4 +59,6 @@ def from_env() -> TrackerConfig:
         reaction_fix_success=os.environ.get("REACTION_FIX_SUCCESS", "\U0001F7E2"),
         reaction_fix_failure=os.environ.get("REACTION_FIX_FAILURE", "\U0001F534"),
         reaction_fix_declined=os.environ.get("REACTION_FIX_DECLINED", "\U0001F7E1"),
+        api_token_default_ttl_hours=api_token_default_ttl_hours,
+        api_token_max_ttl_hours=api_token_max_ttl_hours,
     )

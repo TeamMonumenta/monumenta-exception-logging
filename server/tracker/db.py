@@ -60,6 +60,13 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             ON occurrences(group_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_occurrences_timestamp
             ON occurrences(timestamp);
+        -- Backs GET /api/servers (SELECT DISTINCT server) and the `server` filter in
+        -- Tracker.list_groups/count_groups. Both run synchronously on the shared event
+        -- loop, and `occurrences` is the largest table: measured at 1M rows, the server
+        -- filter's subquery costs ~2.1s unindexed vs ~70ms with this index (and
+        -- /api/groups?server= runs it twice, once for the page and once for the total).
+        CREATE INDEX IF NOT EXISTS idx_occurrences_server
+            ON occurrences(server);
 
         CREATE TABLE IF NOT EXISTS server_hour_counts (
             group_id    INTEGER NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
@@ -107,6 +114,18 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             ON fix_attempts(fingerprint);
         CREATE INDEX IF NOT EXISTS idx_fix_attempts_status
             ON fix_attempts(status, queued_at);
+
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            token_hash  TEXT PRIMARY KEY,
+            discord_id  TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            expires_at  INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_discord_id
+            ON api_tokens(discord_id);
+        CREATE INDEX IF NOT EXISTS idx_api_tokens_expires_at
+            ON api_tokens(expires_at);
     """)
     conn.commit()
 
@@ -120,7 +139,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists (fresh DB or previously migrated)
-
 
 def set_discord_message_id(
     conn: sqlite3.Connection, fingerprint: str, message_id: Optional[str]
@@ -359,6 +377,31 @@ def insert_fix_attempt(
         )
 
 
+_FIX_ATTEMPT_STATUS_COLUMNS = (
+    "job_id, fingerprint, status, message, summary, pr_url, "
+    "queued_at, started_at, completed_at"
+)
+
+
+def get_fix_attempt(conn: sqlite3.Connection, job_id: str) -> Optional[sqlite3.Row]:
+    """Return the full row for a single fix attempt, or None if job_id is unknown."""
+    return conn.execute(
+        f"SELECT {_FIX_ATTEMPT_STATUS_COLUMNS} FROM fix_attempts WHERE job_id = ?",
+        (job_id,),
+    ).fetchone()
+
+
+def get_fix_attempts_for_group(
+    conn: sqlite3.Connection, fingerprint: str, limit: int = 20
+) -> list[sqlite3.Row]:
+    """Return fix attempt rows for a group, newest first."""
+    return conn.execute(
+        f"SELECT {_FIX_ATTEMPT_STATUS_COLUMNS} FROM fix_attempts "
+        "WHERE fingerprint = ? ORDER BY queued_at DESC, id DESC LIMIT ?",
+        (fingerprint, limit),
+    ).fetchall()
+
+
 def has_active_fix_attempt(conn: sqlite3.Connection, fingerprint: str) -> bool:
     """Return True if any pending or running fix attempt exists for this fingerprint."""
     row = conn.execute(
@@ -455,7 +498,8 @@ def timeout_stale_fix_attempts(
 
 
 def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any]:
-    cutoff = int(time.time()) - expiry_days * 86400
+    now = int(time.time())
+    cutoff = now - expiry_days * 86400
     with conn:
         id_rows = conn.execute(
             "SELECT discord_message_id FROM error_groups "
@@ -473,9 +517,56 @@ def run_expiry(conn: sqlite3.Connection, expiry_days: int = 14) -> dict[str, Any
         cur = conn.execute("DELETE FROM error_groups WHERE last_seen < ?", (cutoff,))
         groups_deleted = cur.rowcount
 
+        # api_tokens expire on their own absolute expires_at, independent of
+        # expiry_days, so this uses wall-clock `now` rather than `cutoff`.
+        cur = conn.execute("DELETE FROM api_tokens WHERE expires_at < ?", (now,))
+        tokens_deleted = cur.rowcount
+
     return {
         "occurrences": occ_deleted,
         "server_hour_counts": shc_deleted,
         "error_groups": groups_deleted,
         "discord_message_ids": discord_message_ids,
+        "api_tokens": tokens_deleted,
     }
+
+
+def create_api_token(
+    conn: sqlite3.Connection, token_hash: str, discord_id: str,
+    created_at: int, expires_at: int,
+) -> None:
+    with conn:
+        conn.execute(
+            "INSERT INTO api_tokens (token_hash, discord_id, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            (token_hash, discord_id, created_at, expires_at)
+        )
+
+
+def count_api_tokens(conn: sqlite3.Connection, discord_id: str) -> int:
+    """Return the number of (not-yet-swept) tokens belonging to discord_id, expired or not."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS cnt FROM api_tokens WHERE discord_id = ?", (discord_id,)
+    ).fetchone()
+    return int(row['cnt'])
+
+
+def get_api_token(conn: sqlite3.Connection, token_hash: str) -> Optional[sqlite3.Row]:
+    """Return the (discord_id, expires_at) row for a token hash, or None if unknown.
+
+    Does not check expiry — an expired-but-not-yet-swept row is still returned so
+    callers can distinguish "expired" from "never existed" if they need to.
+    """
+    return conn.execute(
+        "SELECT discord_id, expires_at FROM api_tokens WHERE token_hash = ?",
+        (token_hash,)
+    ).fetchone()
+
+
+def revoke_api_tokens(conn: sqlite3.Connection, discord_id: str) -> int:
+    """Delete every token belonging to discord_id. Returns the number revoked."""
+    with conn:
+        cur = conn.execute(
+            "DELETE FROM api_tokens WHERE discord_id = ?", (discord_id,)
+        )
+    return cur.rowcount

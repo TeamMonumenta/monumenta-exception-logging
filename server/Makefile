@@ -21,7 +21,7 @@ pytest: venv
 	$(PYTHON) -m pytest tests/ -q
 
 lint: venv
-	$(VENV)/bin/pylint tracker/ server.py bot.py tests/
+	$(VENV)/bin/pylint tracker/ server.py bot.py cli/ tests/
 
 typecheck: venv
 	$(VENV)/bin/pyright

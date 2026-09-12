@@ -25,7 +25,7 @@ A JSON array. Each element is one unique retention pattern, sorted most-instance
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `instance_count` | integer ≥ 1 | Number of distinct objects matching this pattern. |
+| `instance_count` | integer >= 1 | Number of distinct objects matching this pattern. |
 | `chain` | array of ChainEntry | Retention path from leaked object to GC root anchor, leaf first. |
 
 ### ChainEntry object
@@ -68,7 +68,7 @@ that make output stable for fingerprinting and easier to read:
 
 Consecutive objects of the same class are collapsed to a single chain entry. A chain
 of 8 `HashMap$Node` objects becomes one `HashMap$Node` entry. The count is **not**
-emitted — varying depths of linked-list or hashmap traversal must not change the
+emitted; varying depths of linked-list or hashmap traversal must not change the
 fingerprint.
 
 ### 2. Class-object / instance collapsing

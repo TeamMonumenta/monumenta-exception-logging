@@ -37,14 +37,14 @@ CREATE INDEX idx_groups_first_seen        ON error_groups(first_seen);
 
 **Column notes:**
 
-- `fingerprint` — stable identifier for a bug. See Fingerprinting section below.
-- `message_template` — the exception message with variable content replaced by tokens, e.g. `"boss_generictarget only works on mobs! Entity name='<name>', tags=[<tags>]"`. Used as part of the fingerprint and for display.
-- `canonical_frames` — JSON array of `{class_name, method, file, line}` objects for the top application frames. These are the frames that were hashed into the fingerprint.
-- `canonical_trace` — complete JSON frame array (all frames) from the very first occurrence. Used to show the full stack in group detail views.
-- `discord_message_id` — ID of the Discord channel message for this group. Set after the bot first posts; cleared (set to null) if the message is deleted externally. Null until a bot is running.
-- `has_activity` — set to `1` whenever new occurrences arrive or the group's status changes; cleared to `0` after the bot successfully edits the Discord message. The refresh loop uses this flag to avoid re-editing messages that have not changed.
-- `muted_by` / `muted_at` — attribution for the most recent mute operation (`display_name` and epoch seconds). Null if the group has never been muted.
-- `resolved_by` / `resolved_at` — attribution for the most recent resolve operation. Null if the group has never been resolved.
+- `fingerprint`: stable identifier for a bug. See Fingerprinting section below.
+- `message_template`: the exception message with variable content replaced by tokens, e.g. `"boss_generictarget only works on mobs! Entity name='<name>', tags=[<tags>]"`. Used as part of the fingerprint and for display.
+- `canonical_frames`: JSON array of `{class_name, method, file, line}` objects for the top application frames. These are the frames that were hashed into the fingerprint.
+- `canonical_trace`: complete JSON frame array (all frames) from the very first occurrence. Used to show the full stack in group detail views.
+- `discord_message_id`: ID of the Discord channel message for this group. Set after the bot first posts; cleared (set to null) if the message is deleted externally. Null until a bot is running.
+- `has_activity`: "the Discord channel message for this group is stale". Set to `1` whenever new occurrences arrive, whenever the group's status changes (`mute_group`, `unmute_group`, `resolve_group`, whether triggered from Discord or the network API), and by the startup fingerprint migration. Cleared to `0` only after the bot **successfully** edits the Discord message, so an edit that fails is retried by the next refresh tick rather than silently dropped. Two deliberate exceptions: a `discord.NotFound` leaves the flag set (the tracked message ID is cleared instead and the group is re-posted by the startup backfill), and a group whose edit fails 3 consecutive times has the flag cleared so a durable failure isn't retried forever; the next occurrence or status change re-arms it. The refresh loop uses this flag to avoid re-editing messages that have not changed.
+- `muted_by` / `muted_at`: attribution for the most recent mute operation (`display_name` and epoch seconds). Null if the group has never been muted.
+- `resolved_by` / `resolved_at`: attribution for the most recent resolve operation. Null if the group has never been resolved.
 
 ---
 
@@ -63,14 +63,12 @@ CREATE TABLE occurrences (
 
 CREATE INDEX idx_occurrences_group_timestamp ON occurrences(group_id, timestamp);
 CREATE INDEX idx_occurrences_timestamp       ON occurrences(timestamp);  -- for expiry sweeps
+CREATE INDEX idx_occurrences_server          ON occurrences(server);     -- for /api/servers + the server filter
 ```
 
-**Why store raw occurrences at all?** Individual rows support:
-- Per-server breakdown for a group in any arbitrary time window
-- Timeline aggregation at any granularity
-- Identifying affected servers for a group
-
-At a few thousand events/hour across all servers, the default 14-day retention window yields at most ~1M rows — well within SQLite's comfortable range.
+Individual rows drive per-server breakdowns, timeline aggregation, and the list of
+servers affected by a group. This is the largest table by a wide margin; every query
+against it goes through one of the indexes above.
 
 ---
 
@@ -118,7 +116,7 @@ CREATE INDEX idx_notify_user ON notify_subscriptions(discord_user_id);
 
 **Notes:**
 
-- `id` uses `AUTOINCREMENT` — IDs are monotonically increasing and are never reused
+- `id` uses `AUTOINCREMENT`: IDs are monotonically increasing and are never reused
   after deletion. This makes IDs safe to reference in DMs (`Matched notify rule #5`)
   even after other rules have been removed.
 - `discord_user_id` is the Discord user snowflake as a string (e.g. `"123456789012345678"`).
@@ -127,7 +125,7 @@ CREATE INDEX idx_notify_user ON notify_subscriptions(discord_user_id);
   exception class, normalized message template, and canonical trace (as a text blob).
 - Maximum 100 subscriptions per user. This limit is enforced by the API layer, not a
   database constraint.
-- This table is not subject to the `EXPIRY_DAYS` retention window — subscriptions
+- This table is not subject to the `EXPIRY_DAYS` retention window; subscriptions
   persist until explicitly removed by the user.
 
 ---
@@ -195,8 +193,8 @@ CREATE INDEX idx_fix_attempts_status      ON fix_attempts(status, queued_at);
 **Notes:**
 
 - `fingerprint` is a plain TEXT column, not a foreign key. Fix attempt rows are intentionally
-  not cascade-deleted when the parent error group expires — they accumulate for future
-  `/fix-history` queries.
+  not cascade-deleted when the parent error group expires; they accumulate for the
+  `/fix-history` slash command and `GET /api/groups/<id>/fix-attempts`.
 - `rendered_message` is the fully rendered prompt template captured at queue time, not at poll
   time. This is intentional: the state at the moment of the fix request is what Chisel acts on.
 - If the server restarts while a job is `running`, the job remains stuck indefinitely.
@@ -208,25 +206,55 @@ CREATE INDEX idx_fix_attempts_status      ON fix_attempts(status, queued_at);
 
 ---
 
+### `api_tokens`
+
+Bearer tokens for the network API (see NETWORK_API.md's "Attribution" section), minted
+by the `/api-token create` slash command and verified on every mutating `/api/*` request.
+
+```sql
+CREATE TABLE api_tokens (
+    token_hash  TEXT PRIMARY KEY,   -- SHA-256 hex of the raw token; the raw value is never stored
+    discord_id  TEXT NOT NULL,      -- Discord user snowflake the token proves (stored as text)
+    created_at  INTEGER NOT NULL,   -- epoch seconds
+    expires_at  INTEGER NOT NULL    -- epoch seconds; absolute, independent of EXPIRY_DAYS
+);
+
+CREATE INDEX idx_api_tokens_discord_id ON api_tokens(discord_id);  -- for revoke_api_tokens
+CREATE INDEX idx_api_tokens_expires_at ON api_tokens(expires_at);  -- for the expiry sweep
+```
+
+**Notes:**
+
+- The raw token (`secrets.token_urlsafe(32)`, 256 bits) is returned to the user exactly
+  once, in the ephemeral reply to `/api-token create`, and is never persisted — only
+  its SHA-256 hash.
+- `/api-token revoke` deletes every row for the calling user's `discord_id`.
+  Revocation is immediate — the next request with that token 401s.
+- Maximum 20 live (including expired-but-not-yet-swept) tokens per user, enforced by
+  the API layer, not a database constraint.
+- Not subject to `EXPIRY_DAYS`; see "Auto-Expiry" below for how tokens are swept.
+
+---
+
 ## Fingerprinting Algorithm
 
 The fingerprint is computed by the Python ingest service from the raw event. It must be stable across re-occurrences of the same logical bug.
 
 **Inputs:**
-1. `exception_class` — taken directly from the event.
-2. `normalized_message` — the exception's `message` field with variable content replaced by tokens. Normalization rules (applied in order):
-   - Hyphenated UUIDs → `<uuid>` (pattern: `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
-   - Bare (unhyphenated) UUIDs → `<uuid>` (pattern: `\b[0-9a-f]{32}\b`; catches player UUIDs embedded in Mojang auth session URLs, e.g. `/profile/3601df3d96f54dc1b10b8a4ebcefd210?unsigned=false`)
-   - IP addresses → `<ip>`
-   - Plugin versions → `<version>` (pattern: `\bv?\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{4,}|-SNAPSHOT)+\b`; catches `git describe` build strings like `v11.80.2-1-gf114425-SNAPSHOT`. A git-describe or `-SNAPSHOT` suffix is required, so plain dotted numbers are left to the number rule)
-   - Long numbers (≥ 4 digits) → `<N>` (catches coordinates, entity IDs, counts)
-   - Quoted string values → `<str>` (pattern: `'[^']{1,64}'` or `"[^"]{1,64}"`)
-   - Sequences of tags/NBT-like content in brackets → `<data>`
-   - Long opaque alphanumeric tokens (≥ 32 characters composed of `[A-Za-z0-9_-]`) → `<id>` (catches CDN/WAF request IDs, auth tokens, hashes, etc. — any long token that isn't a bare UUID)
-   - Guild permission keys matching `guild.<name>.<role>` → `guild.<id>` (catches varying guild names like `guild.nova+.member`, `guild.lads.member`)
+1. `exception_class`: taken directly from the event.
+2. `normalized_message`: the exception's `message` field with variable content replaced by tokens. Normalization rules (applied in order):
+   - Hyphenated UUIDs -> `<uuid>` (pattern: `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
+   - Bare (unhyphenated) UUIDs -> `<uuid>` (pattern: `\b[0-9a-f]{32}\b`; catches player UUIDs embedded in Mojang auth session URLs, e.g. `/profile/3601df3d96f54dc1b10b8a4ebcefd210?unsigned=false`)
+   - IP addresses -> `<ip>`
+   - Plugin versions -> `<version>` (pattern: `\bv?\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{4,}|-SNAPSHOT)+\b`; catches `git describe` build strings like `v11.80.2-1-gf114425-SNAPSHOT`. A git-describe or `-SNAPSHOT` suffix is required, so plain dotted numbers are left to the number rule)
+   - Long numbers (>= 4 digits) -> `<N>` (catches coordinates, entity IDs, counts)
+   - Quoted string values -> `<str>` (pattern: `'[^']{1,64}'` or `"[^"]{1,64}"`)
+   - Sequences of tags/NBT-like content in brackets -> `<data>`
+   - Long opaque alphanumeric tokens (>= 32 characters composed of `[A-Za-z0-9_-]`) -> `<id>` (catches CDN/WAF request IDs, auth tokens, hashes, etc.; any long token that isn't a bare UUID)
+   - Guild permission keys matching `guild.<name>.<role>` -> `guild.<id>` (catches varying guild names like `guild.nova+.member`, `guild.lads.member`)
 
    Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`. Versions are consumed before the number rule, so the abbreviated git hash isn't fragmented into `g<N>` noise.
-3. `top_app_frames` — the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
+3. `top_app_frames`: the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
 
 **Hash:**
 ```python
@@ -247,7 +275,7 @@ If no application frames are found (e.g. the exception originates entirely in fr
 ## Auto-Expiry
 
 A background task runs every hour and purges stale data in this order. The retention window is
-controlled by the `EXPIRY_DAYS` environment variable (default: 14 days; `1209600` = 14 × 86400 s):
+controlled by the `EXPIRY_DAYS` environment variable (default: 14 days; `1209600` = 14 x 86400 s):
 
 ```sql
 -- 1. Delete old occurrences (older than EXPIRY_DAYS)
@@ -258,6 +286,10 @@ DELETE FROM server_hour_counts WHERE hour_bucket < strftime('%s', 'now') - 12096
 
 -- 3. Delete groups not seen within EXPIRY_DAYS (cascades to any remaining child rows)
 DELETE FROM error_groups WHERE last_seen < strftime('%s', 'now') - 1209600;
+
+-- 4. Delete API tokens past their own expires_at (independent of EXPIRY_DAYS — this
+--    uses wall-clock "now", not an EXPIRY_DAYS-scaled cutoff)
+DELETE FROM api_tokens WHERE expires_at < strftime('%s', 'now');
 ```
 
 The cascade deletes on `occurrences` and `server_hour_counts` (via `ON DELETE CASCADE`) ensure referential integrity when groups are removed.

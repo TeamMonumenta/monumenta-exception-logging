@@ -15,14 +15,17 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from tracker.api import FrameSummary, GroupDetails, GroupSummary, Tracker
+from tracker.api import FixAttemptStatus, GroupDetails, GroupSummary, Tracker
+from tracker.chisel import FixRequestOutcome, fmt_frame, request_fix
 from tracker.config import TrackerConfig
 
 logger = logging.getLogger(__name__)
 
 _MAX_MSG_LEN = 2000
 _MAX_NOTIFY_SUBS = 100   # maximum subscriptions per user
+_MAX_API_TOKENS = 20     # maximum API tokens per user
 _NOTIFY_TEST_LIMIT = 5   # max DMs sent by /notify test
+_MAX_EDIT_FAILURES = 3   # consecutive failed edits before a group stops being retried
 _EMOJI_MUTE = "\U0001F6AB"    # :no_entry:
 _EMOJI_RESOLVE = "\u2705"     # :white_check_mark:
 _EMOJI_QUESTION = "\u2753"    # :question:
@@ -31,11 +34,6 @@ _EMOJI_QUESTION = "\u2753"    # :question:
 # ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------
-
-def _fmt_frame(frame: FrameSummary) -> str:
-    file_info = f"{frame.file}:{frame.line}" if frame.file else "Unknown"
-    return f"  at {frame.class_name}.{frame.method}({file_info})"
-
 
 def _build_frames_block(frame_lines: list[str], available: int) -> str:
     """Return frame text that fits within *available* characters.
@@ -97,7 +95,7 @@ def format_exception_message(details: GroupDetails, max_len: int = _MAX_MSG_LEN)
     if details.message_template:
         exc_line += f": {details.message_template}"
 
-    frame_lines = [_fmt_frame(f) for f in details.canonical_trace]
+    frame_lines = [fmt_frame(f) for f in details.canonical_trace]
 
     if details.status == "muted" and details.muted_at is not None:
         ts = int(details.muted_at.timestamp())
@@ -157,31 +155,38 @@ def _matches_notify(pattern: str, details: GroupDetails) -> bool:
     )
 
 
-def _render_fix_prompt(template: str, details: GroupDetails) -> str:
-    """Substitute template variables with exception group data.
+def _resolve_token_ttl(requested: Optional[int], default: int, maximum: int) -> int:
+    """Resolve the lifetime for a newly minted API token, in hours.
 
-    Uses regex substitution rather than str.format() so that curly braces in
-    exception messages and stack traces do not cause KeyError or IndexError.
-    Unknown variables (not in the substitution map) are left as-is.
+    `requested` is the caller's `/api-token create` argument; falls back to
+    `default` when omitted. Clamped to [1, maximum] rather than rejected, so a
+    caller who asks for more than the configured ceiling still gets a token
+    (just a shorter-lived one) instead of an error.
     """
-    stacktrace = "\n".join(_fmt_frame(f) for f in details.canonical_trace)
-    servers = ", ".join(sorted(details.servers_affected)) if details.servers_affected else "none"
-    subs: dict[str, str] = {
-        "short_id": details.fingerprint[:8],
-        "exception_class": details.exception_class,
-        "message": details.message_template,
-        "raw_message": details.latest_message if details.latest_message is not None else details.message_template,
-        "stacktrace": stacktrace,
-        "count": str(details.total_count),
-        "servers": servers,
-        "first_seen": details.first_seen.isoformat(),
-        "last_seen": details.last_seen.isoformat(),
-    }
+    hours = requested if requested is not None else default
+    return max(1, min(hours, max(1, maximum)))
 
-    def _replace(m: re.Match[str]) -> str:
-        return subs.get(m.group(1), m.group(0))
 
-    return re.sub(r"\{(\w+)\}", _replace, template)
+def _format_api_token_created_message(token: str, expires_at: int, prefix: str) -> str:
+    """Render the ephemeral reply for `/api-token create`.
+
+    The token is wrapped in inline code *inside* the spoiler (`` ||`token`|| ``, not
+    `||token||`) because Discord still applies markdown inside a spoiler: a token from
+    `secrets.token_urlsafe` can contain `-`/`_`, and an unlucky run of those can be
+    parsed as italics/underline, silently dropping characters from what gets copied.
+
+    The literal `{token}` in the second line is a placeholder in example text, not the
+    real secret — this is an f-string, so `{{token}}` is deliberately double-braced to
+    produce that literal instead of interpolating (the actual secret only appears once,
+    in the spoiler above).
+    """
+    return (
+        f"Token (expires <t:{expires_at}:R>), shown once — copy it now:\n"
+        f"||`{token}`||\n"
+        f"Set it as `EXCTL_API_TOKEN` (or pass `--token`) for `exctl`, or send it "
+        f"as `Authorization: Bearer {{token}}` directly. "
+        f"Use `/{prefix}api-token revoke` to invalidate every token you've minted."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -224,13 +229,29 @@ def _fmt_details_lines(details: GroupDetails) -> list[str]:
     ]
     if details.latest_message:
         lines.append(f"Latest message: `{details.latest_message}`")
-    lines += ["**Stack trace:**"] + [_fmt_frame(f) for f in details.canonical_trace]
-    if details.muted_by:
+    lines += ["**Stack trace:**"] + [fmt_frame(f) for f in details.canonical_trace]
+    if details.status == "muted" and details.muted_by:
         ts = int(details.muted_at.timestamp()) if details.muted_at else 0
         lines.insert(1, f"Muted by {details.muted_by} on <t:{ts}:f>")
-    if details.resolved_by:
+    if details.status == "resolved" and details.resolved_by:
         ts = int(details.resolved_at.timestamp()) if details.resolved_at else 0
         lines.insert(1, f"Resolved by {details.resolved_by} on <t:{ts}:f>")
+    return lines
+
+
+def _fmt_fix_history_lines(short_id: str, attempts: list[FixAttemptStatus]) -> list[str]:
+    """Build the line list for a group's fix-attempt history response."""
+    lines = [f"**Fix history: `{short_id}`**"]
+    if not attempts:
+        lines.append("No fix attempts.")
+        return lines
+    for a in attempts:
+        ts = int(a.queued_at.timestamp())
+        lines.append(f"`{a.job_id[:8]}` [{a.status}] - queued <t:{ts}:f>")
+        if a.message:
+            lines.append(f"  {a.message}")
+        if a.pr_url:
+            lines.append(f"  {a.pr_url}")
     return lines
 
 
@@ -291,6 +312,12 @@ class ExceptionBot(commands.Bot):
         self.refresh_period = refresh_period
         self.slash_command_prefix = slash_command_prefix
         self._refresh_running = False
+        # Consecutive edit_exception_message failures per fingerprint. has_activity is
+        # only cleared on a successful edit (so a missed edit is retried), which means a
+        # group whose edit fails for a durable reason would otherwise be retried on every
+        # refresh tick forever. After _MAX_EDIT_FAILURES the flag is cleared to stop the
+        # loop; new activity on the group sets it again and the retries resume.
+        self._edit_failures: dict[str, int] = {}
         cfg = config or TrackerConfig()
         self._chisel_public_url: Optional[str] = cfg.chisel_public_url
         self._chisel_fix_prompt_path: str = cfg.chisel_fix_prompt_path
@@ -301,6 +328,8 @@ class ExceptionBot(commands.Bot):
         self._reaction_fix_failure: str = cfg.reaction_fix_failure
         self._reaction_fix_declined: str = cfg.reaction_fix_declined
         self._purge_allowed_users: list[str] = cfg.purge_allowed_users
+        self._api_token_default_ttl_hours: int = cfg.api_token_default_ttl_hours
+        self._api_token_max_ttl_hours: int = cfg.api_token_max_ttl_hours
 
     async def setup_hook(self) -> None:
         self._register_commands()
@@ -390,14 +419,44 @@ class ExceptionBot(commands.Bot):
         try:
             message = await channel.fetch_message(int(message_id))
             await message.edit(content=content)
+            # Clear only on a successful edit, so a failed one is retried by the next
+            # refresh tick. has_activity means exactly "the channel message is stale".
+            self.tracker.clear_has_activity(fingerprint)
+            self._edit_failures.pop(fingerprint, None)
         except discord.NotFound:
             logger.warning(
                 "Message %s not found for fingerprint %s; clearing tracked ID",
                 message_id, fingerprint
             )
+            # Deliberately leaves has_activity set: the group now has no tracked message
+            # and is picked up by _backfill_missing_messages instead.
             self.tracker.set_discord_message_id(fingerprint, None)
+            self._edit_failures.pop(fingerprint, None)
         except discord.DiscordException:
             logger.exception("Failed to edit message %s", message_id)
+            self._record_edit_failure(fingerprint)
+
+    def _record_edit_failure(self, fingerprint: str) -> None:
+        """Give up retrying a group whose edit keeps failing.
+
+        Without a ceiling, a durable failure (message too long to edit, a permission
+        that was revoked, a channel the bot can no longer write to) would be retried on
+        every refresh tick indefinitely, each one logging a traceback and spending a
+        Discord API call. After _MAX_EDIT_FAILURES consecutive failures the flag is
+        cleared so the loop stops; the next occurrence of the exception - or the next
+        mute/unmute/resolve - sets has_activity again and retries resume from scratch.
+        """
+        failures = self._edit_failures.get(fingerprint, 0) + 1
+        if failures < _MAX_EDIT_FAILURES:
+            self._edit_failures[fingerprint] = failures
+            return
+        logger.error(
+            "Giving up on editing message for group %s after %d consecutive failures; "
+            "will retry when the group next sees activity",
+            fingerprint[:8], failures,
+        )
+        self.tracker.clear_has_activity(fingerprint)
+        self._edit_failures.pop(fingerprint, None)
 
     async def delete_channel_message(self, message_id: str) -> None:
         """Delete a channel message by ID (e.g. after its group expires)."""
@@ -444,7 +503,6 @@ class ExceptionBot(commands.Bot):
                         await asyncio.sleep(2)
                     first = False
                     await self.edit_exception_message(fingerprint, message_id)
-                    self.tracker.clear_has_activity(fingerprint)
                 for msg_id in self.tracker.pop_pending_discord_deletes():
                     await self.delete_channel_message(msg_id)
             finally:
@@ -549,31 +607,28 @@ class ExceptionBot(commands.Bot):
         job_queued = False
         if not user_allowed:
             pass  # fall through to wrench removal
-        elif self.tracker.has_active_fix_attempt(fingerprint):
-            logger.info(
-                "Fix request ignored: active fix attempt already exists for %s",
-                fingerprint[:8],
-            )
         else:
-            try:
-                with open(self._chisel_fix_prompt_path, encoding="utf-8") as fh:
-                    template = fh.read()
-            except OSError:
+            result = request_fix(
+                self.tracker, fingerprint, str(payload.user_id),
+                self._chisel_public_url, self._chisel_fix_prompt_path,
+            )
+            if result.outcome == FixRequestOutcome.QUEUED:
+                job_queued = True
+                logger.info(
+                    "Fix attempt queued: job %s for group %s by user %d",
+                    result.job_id, fingerprint[:8], payload.user_id,
+                )
+            elif result.outcome == FixRequestOutcome.ALREADY_ACTIVE:
+                logger.info(
+                    "Fix request ignored: active fix attempt already exists for %s",
+                    fingerprint[:8],
+                )
+            elif result.outcome == FixRequestOutcome.TEMPLATE_UNREADABLE:
                 logger.error(
                     "Could not read fix prompt template: %s", self._chisel_fix_prompt_path
                 )
-            else:
-                details = self.tracker.get_group_details(fingerprint)
-                if details is not None:
-                    rendered = _render_fix_prompt(template, details)
-                    job_id = self.tracker.queue_fix_attempt(
-                        fingerprint, rendered, str(payload.user_id)
-                    )
-                    logger.info(
-                        "Fix attempt queued: job %s for group %s by user %d",
-                        job_id, fingerprint[:8], payload.user_id,
-                    )
-                    job_queued = True
+            # NOT_CONFIGURED can't happen here (checked above); GROUP_NOT_FOUND is a
+            # silent no-op, matching prior behavior when get_group_details() returned None.
 
         # Always remove the wrench reaction so it cannot linger after a restart.
         channel = await self._get_channel()
@@ -610,6 +665,59 @@ class ExceptionBot(commands.Bot):
                 "Failed to update reactions for fix request on message %d", payload.message_id
             )
 
+    async def add_fix_working_reaction(self, fingerprint: str) -> None:
+        """Mark a group's channel message as having a fix in flight.
+
+        The :wrench: reaction handler does this inline as part of its reaction swap
+        (see _handle_fix_request_reaction). A fix requested through
+        POST /api/groups/<id>/fix has no reaction to swap, so the API route calls this
+        instead - otherwise channel watchers would see the outcome emoji appear with no
+        prior sign that anything was running, and on_fix_attempt_completed would be
+        removing a working reaction that was never added.
+        """
+        if not self._reaction_fix_working:
+            return
+        message_id = self.tracker.get_discord_message_id(fingerprint)
+        if message_id is None:
+            return
+        channel = await self._get_channel()
+        if channel is None:
+            return
+        try:
+            message = await channel.fetch_message(int(message_id))
+            await message.add_reaction(self._reaction_fix_working)
+        except discord.DiscordException:
+            logger.exception(
+                "Failed to add working reaction for API fix request on group %s",
+                fingerprint[:8],
+            )
+
+    async def resolve_display_name(self, discord_id: str) -> str:
+        """Resolve a Discord user ID to a display name: the guild member's
+        nickname-aware display name, falling back to the account's global display
+        name, and to the raw ID string if Discord can't resolve them.
+        """
+        try:
+            user_id = int(discord_id)
+        except ValueError:
+            return discord_id
+        channel = await self._get_channel()
+        guild = getattr(channel, "guild", None)
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except discord.DiscordException:
+                    member = None
+            if member is not None:
+                return member.display_name
+        try:
+            user = await self.fetch_user(user_id)
+            return user.display_name
+        except discord.DiscordException:
+            return discord_id
+
     async def on_fix_attempt_completed(
         self,
         fingerprint: str,
@@ -620,12 +728,7 @@ class ExceptionBot(commands.Bot):
         requester_discord_id: Optional[str] = None,
     ) -> None:
         """Swap the working reaction to an outcome emoji and DM the requester."""
-        msg_pairs = self.tracker.get_all_discord_messages()
-        message_id: Optional[str] = None
-        for fp, mid in msg_pairs:
-            if fp == fingerprint:
-                message_id = mid
-                break
+        message_id = self.tracker.get_discord_message_id(fingerprint)
         if message_id is None:
             logger.warning(
                 "No Discord message found for fingerprint %s on fix completion", fingerprint[:8]
@@ -714,11 +817,12 @@ class ExceptionBot(commands.Bot):
         fingerprint = self.tracker.get_fingerprint_by_discord_message_id(str(payload.message_id))
         if fingerprint is None:
             return
-        ok = self.tracker.unmute_group(fingerprint)
+        actor = payload.member.display_name if payload.member else str(payload.user_id)
+        ok = self.tracker.unmute_group(fingerprint, actor=actor)
         if ok:
             await self.edit_exception_message(fingerprint, str(payload.message_id))
-            logger.info("Reaction removed: unmuted group %s by user %d",
-                        fingerprint[:8], payload.user_id)
+            logger.info("Reaction removed: unmuted group %s by %s",
+                        fingerprint[:8], actor)
 
     # --- Slash command helpers ---
 
@@ -836,6 +940,21 @@ class ExceptionBot(commands.Bot):
                 return
             await _send_chunks(interaction, _fmt_details_lines(details))
 
+        @self.tree.command(
+            name=f"{p}fix-history", description="Fix attempt history for an exception group"
+        )
+        @app_commands.describe(short_id="8-character short ID shown in group listings")
+        async def cmd_fix_history(interaction: discord.Interaction, short_id: str) -> None:
+            await interaction.response.defer(ephemeral=True)
+            fingerprint = self._resolve_short_id(short_id)
+            if fingerprint is None:
+                await interaction.followup.send(
+                    f"No group with short ID `{short_id}`.", ephemeral=True
+                )
+                return
+            attempts = self.tracker.get_fix_attempts_for_group(fingerprint)
+            await _send_chunks(interaction, _fmt_fix_history_lines(short_id, attempts))
+
         @self.tree.command(name=f"{p}mute", description="Mute an exception group")
         @app_commands.describe(short_id="8-character short ID of the group to mute")
         async def cmd_mute(interaction: discord.Interaction, short_id: str) -> None:
@@ -851,11 +970,9 @@ class ExceptionBot(commands.Bot):
             if not ok:
                 await interaction.followup.send("Mute failed (group not found).", ephemeral=True)
                 return
-            msg_pairs = self.tracker.get_all_discord_messages()
-            for fp, msg_id in msg_pairs:
-                if fp == fingerprint:
-                    await self.edit_exception_message(fingerprint, msg_id)
-                    break
+            msg_id = self.tracker.get_discord_message_id(fingerprint)
+            if msg_id is not None:
+                await self.edit_exception_message(fingerprint, msg_id)
             await interaction.followup.send(f"Muted `{short_id}`.", ephemeral=True)
 
         @self.tree.command(name=f"{p}unmute", description="Unmute an exception group")
@@ -868,15 +985,13 @@ class ExceptionBot(commands.Bot):
                     f"No group with short ID `{short_id}`.", ephemeral=True
                 )
                 return
-            ok = self.tracker.unmute_group(fingerprint)
+            ok = self.tracker.unmute_group(fingerprint, actor=interaction.user.display_name)
             if not ok:
                 await interaction.followup.send("Unmute failed (group not found).", ephemeral=True)
                 return
-            msg_pairs = self.tracker.get_all_discord_messages()
-            for fp, msg_id in msg_pairs:
-                if fp == fingerprint:
-                    await self.edit_exception_message(fingerprint, msg_id)
-                    break
+            msg_id = self.tracker.get_discord_message_id(fingerprint)
+            if msg_id is not None:
+                await self.edit_exception_message(fingerprint, msg_id)
             await interaction.followup.send(f"Unmuted `{short_id}`.", ephemeral=True)
 
         @self.tree.command(name=f"{p}resolve", description="Mark an exception group as resolved")
@@ -896,11 +1011,9 @@ class ExceptionBot(commands.Bot):
                     "Resolve failed (group not found).", ephemeral=True
                 )
                 return
-            msg_pairs = self.tracker.get_all_discord_messages()
-            for fp, msg_id in msg_pairs:
-                if fp == fingerprint:
-                    await self.edit_exception_message(fingerprint, msg_id)
-                    break
+            msg_id = self.tracker.get_discord_message_id(fingerprint)
+            if msg_id is not None:
+                await self.edit_exception_message(fingerprint, msg_id)
             await interaction.followup.send(f"Resolved `{short_id}`.", ephemeral=True)
 
         # --- /notify subcommand group ---
@@ -1043,6 +1156,56 @@ class ExceptionBot(commands.Bot):
                 )
 
         self.tree.add_command(notify_group)
+
+        # --- /api-token subcommand group ---
+
+        api_token_group = app_commands.Group(
+            name=f"{p}api-token",
+            description="Manage bearer tokens for the network API (see NETWORK_API.md)",
+        )
+
+        @api_token_group.command(
+            name="create",
+            description=f"Mint a network API bearer token attributed to you "
+                        f"(max {_MAX_API_TOKENS} per user)",
+        )
+        @app_commands.describe(
+            lifetime_hours=f"Hours until the token expires (default "
+                           f"{self._api_token_default_ttl_hours}, max "
+                           f"{self._api_token_max_ttl_hours})"
+        )
+        async def api_token_create(
+            interaction: discord.Interaction, lifetime_hours: Optional[int] = None
+        ) -> None:
+            await interaction.response.defer(ephemeral=True)
+            ttl_hours = _resolve_token_ttl(
+                lifetime_hours, self._api_token_default_ttl_hours, self._api_token_max_ttl_hours
+            )
+            discord_id = str(interaction.user.id)
+            try:
+                token, expires_at = self.tracker.create_api_token(discord_id, ttl_hours)
+            except ValueError as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            await interaction.followup.send(
+                _format_api_token_created_message(token, expires_at, p), ephemeral=True
+            )
+
+        @api_token_group.command(
+            name="revoke",
+            description="Revoke every network API token you've minted",
+        )
+        async def api_token_revoke(interaction: discord.Interaction) -> None:
+            await interaction.response.defer(ephemeral=True)
+            discord_id = str(interaction.user.id)
+            count = self.tracker.revoke_api_tokens(discord_id)
+            if count == 0:
+                await interaction.followup.send("You have no active tokens to revoke.",
+                                                 ephemeral=True)
+                return
+            await interaction.followup.send(f"Revoked {count} token(s).", ephemeral=True)
+
+        self.tree.add_command(api_token_group)
 
         # --- /purge ---
 
