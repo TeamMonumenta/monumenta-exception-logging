@@ -6,6 +6,10 @@ into a central SQLite database, with Discord integration for alerts and triage.
 
 Minimal requirements make this relatively simple to deploy in any setup.
 
+This repository also contains [pr-bot](pr-bot/README.md), a separate Discord bot that
+tracks GitHub pull request state. It shares no code or data with the exception tracker
+and is documented independently.
+
 ## Components
 
 ### Java Plugin (`plugin/`)
@@ -38,10 +42,20 @@ The plugin is configured via environment variables for simplicity in a docker/ku
 | `/excepttest` | `monumenta.excepttest` | Sends a synthetic exception to the ingest service with a pseudorandom class/method/line so every invocation creates a new exception group. Useful for verifying the full pipeline end-to-end. |
 | `/exceptverbose` | `monumenta.exceptverbose` | Toggles verbose logging at runtime. Equivalent to setting `EXCEPTLOG_VERBOSE` at startup but can be flipped without a restart. Reports the new state to the sender. |
 
+### Heap Leak Detector (`heap-logger/`)
+
+A separate service, deployed as a Kubernetes DaemonSet, that analyzes heap dumps (triggered
+by `HEAPLOG_AUTO_DUMP` or a manual `/spark heapdump`) with the `heaptool` Rust binary and
+reports each detected memory-leak pattern to the Python server as a synthetic exception,
+using the same ingest protocol the plugin uses (see "Synthetic Exceptions from heap-logger"
+in [PROTOCOL.md](PROTOCOL.md)). See [heap-logger/README.md](heap-logger/README.md) for how
+it fits into the pipeline and [heap-logger/SCHEMA.md](heap-logger/SCHEMA.md) for the
+`heaptool --json` output it consumes.
+
 ### Python Server (`server/`)
 
 Receives events, fingerprints and groups them, stores in SQLite (WAL mode), and exposes a query/
-mutation API consumed by the embedded Discord bot.
+mutation API consumed by the embedded Discord bot and the network API below.
 
 **Packages:**
 
@@ -52,8 +66,10 @@ mutation API consumed by the embedded Discord bot.
 | `tracker/fingerprint.py` | Message normalization + SHA-256 fingerprinting |
 | `tracker/ingest.py` | Pydantic validation + ingest pipeline |
 | `tracker/api.py` | `Tracker` class: all query and mutation methods |
-| `server.py` | Quart HTTP app (`POST /ingest`) + async entry point |
+| `tracker/chisel.py` | Fix-request logic shared by the `:wrench:` reaction handler and `POST /api/groups/<id>/fix` |
+| `server.py` | Quart HTTP app (`POST /ingest`, `/chisel/*`, `/api/*`) + async entry point |
 | `bot.py` | Discord bot (slash commands, channel message management) |
+| `cli/exctl.py` | Standalone CLI for the network API (see "Network API" below) |
 
 The server is configured via environment variables:
 
@@ -77,6 +93,8 @@ The server is configured via environment variables:
 | `REACTION_FIX_SUCCESS` | Emoji shown when Chisel opens a PR (default: 🟢). Set to empty string to suppress. |
 | `REACTION_FIX_FAILURE` | Emoji shown when Chisel fails (default: 🔴). Set to empty string to suppress. |
 | `REACTION_FIX_DECLINED` | Emoji shown when Chisel declines the task (default: 🟡). Set to empty string to suppress. |
+| `API_TOKEN_DEFAULT_TTL_HOURS` | Default lifetime of a network API bearer token minted by `/api-token create` when no `lifetime_hours` argument is given (default: `24`). |
+| `API_TOKEN_MAX_TTL_HOURS` | Upper bound on `/api-token create`'s `lifetime_hours` argument; requests above it are clamped, not rejected (default: `168`, i.e. 1 week). |
 
 ## Architecture
 
@@ -132,23 +150,32 @@ fingerprint. Muted groups are displayed as spoilers (`||..||`); resolved groups 
 
 Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names are as shown).
 
-| Command | Args | Description |
-|---|---|---|
-| `/top` | `[window_hours=24]` | Top 20 active groups by recent count |
-| `/new` | `[hours=24]` | Groups first seen in the last N hours |
-| `/search` | `query` | Search by exception class, message text, or stack frame (e.g. `ParticleManager.java`) |
-| `/server` | `name` | Top groups for a specific server |
-| `/muted` | - | List muted groups |
-| `/resolved` | - | List resolved groups |
-| `/details` | `short_id` | Full details with stack trace and timeline |
-| `/mute` | `short_id` | Mute a group |
-| `/unmute` | `short_id` | Unmute a group |
-| `/resolve` | `short_id` | Mark a group resolved |
-| `/purge` | `[server] [older_than_days] [fixed] [muted]` | Delete exception groups matching the given filters (see `DISCORD_PURGE_USERS`) |
-| `/notify add` | `pattern` | Add a personal notification rule (Python regex) |
-| `/notify list` | - | List your notification rules with their IDs |
-| `/notify remove` | `id` | Remove a notification rule by ID |
-| `/notify test` | `id` | Test a rule against all active groups (sends up to 5 DMs) |
+| Command | Args | Limit | Description |
+|---|---|---|---|
+| `/top` | `[window_hours=24]` | 20 | Top active groups by recent count |
+| `/new` | `[hours=24]` | none (time-windowed only) | Groups first seen in the last N hours |
+| `/search` | `query` | 20 | Search by exception class, message text, or stack frame (e.g. `ParticleManager.java`) |
+| `/server` | `name` | 20 | Top groups for a specific server |
+| `/muted` | - | 20 | List muted groups |
+| `/resolved` | - | 20 | List resolved groups |
+| `/details` | `short_id` | n/a (single group) | Full details with stack trace, affected servers, and mute/resolve attribution |
+| `/fix-history` | `short_id` | 20 | Chisel fix attempt history for a group |
+| `/mute` | `short_id` | n/a | Mute a group |
+| `/unmute` | `short_id` | n/a | Unmute a group |
+| `/resolve` | `short_id` | n/a | Mark a group resolved |
+| `/purge` | `[server] [older_than_days] [fixed] [muted]` | n/a | Delete exception groups matching the given filters (see `DISCORD_PURGE_USERS`) |
+| `/notify add` | `pattern` | n/a | Add a personal notification rule (Python regex) |
+| `/notify list` | - | n/a | List your notification rules with their IDs |
+| `/notify remove` | `id` | n/a | Remove a notification rule by ID |
+| `/notify test` | `id` | 5 DMs | Test a rule against all active groups |
+| `/api-token create` | `[lifetime_hours]` | n/a | Mint a network API bearer token bound to your Discord ID, shown once |
+| `/api-token revoke` | - | n/a | Revoke every network API token you've minted |
+
+`/unmute` also un-resolves: it returns a group to `active` and clears both the mute and
+the resolve attribution, matching the reaction behavior described below. Every one of
+these commands has a network-API equivalent except `/purge` and `/notify` - see
+[NETWORK_API.md](NETWORK_API.md). `/api-token` exists only in Discord, with no
+network-API equivalent.
 
 **Personal notifications:**
 
@@ -191,7 +218,7 @@ to automatically fix that exception and open a pull request.
 
 | Endpoint | Description |
 |---|---|
-| `POST /chisel/poll` | Chisel polls this to claim the next pending fix job. Returns 200 with `{message, requester_id, callback_url}` or 204 if the queue is empty. Authentication is handled at the Kubernetes ingress layer - see the deployment docs. |
+| `POST /chisel/poll` | Chisel polls this to claim the next pending fix job. Returns 200 with `{message, requester_id, callback_url}` or 204 if the queue is empty. Authentication is handled at the Kubernetes ingress layer, not by the Quart app itself - see "Security" below. |
 | `POST /chisel/callback/<job_id>` | Chisel POSTs the job result here on completion. Updates the fix attempt record, swaps the Discord reaction to the outcome emoji, and DMs the user who requested the fix. |
 
 **Callback request body** (POSTed by Chisel to `/chisel/callback/<job_id>`):
@@ -223,7 +250,8 @@ The fix request workflow:
 
 If a fix attempt is already pending or running for a group, a second `:wrench:` reaction is
 silently ignored (the wrench is still removed). Fix attempt history is stored in the
-`fix_attempts` table for future `/fix-history` commands.
+`fix_attempts` table and available via the `/fix-history` slash command or
+`GET /api/groups/<id>/fix-attempts` (see [NETWORK_API.md](NETWORK_API.md)).
 
 The `fix_exception_prompt.md` template supports these variables:
 
@@ -239,6 +267,17 @@ The `fix_exception_prompt.md` template supports these variables:
 | `{first_seen}` | ISO timestamp of first occurrence |
 | `{last_seen}` | ISO timestamp of most recent occurrence |
 
+### Network API (`/api/`)
+
+`server/server.py` also exposes a set of `/api/*` HTTP routes on the same Quart app
+and port as `/ingest` and `/chisel/*`, for querying and mutating exception groups
+without going through Discord. A zero-dependency Python CLI, `server/cli/exctl.py`,
+wraps this API (see [`server/cli/README.md`](server/cli/README.md)).
+
+Reads are unauthenticated, same as `/ingest`; mutations require a bearer token minted
+via `/api-token create` in Discord. There is no `/api/purge`. Full endpoint reference,
+query parameters, and JSON conventions: [NETWORK_API.md](NETWORK_API.md).
+
 ### Async model
 
 Quart (async Flask) and discord.py share a single asyncio event loop. SQLite calls use the
@@ -247,7 +286,18 @@ writes complete fast enough not to block the event loop meaningfully.
 
 ### Security
 
-No authentication. Plain HTTP only. You must ensure that the server is properly firewalled.
+No authentication. Plain HTTP only. You must ensure that the server is properly
+firewalled. `/ingest`, `/chisel/*`, and `/api/*` all share the same Quart app and port,
+so this applies to all three alike.
+
+`/api/*` reads are unauthenticated, same as `/ingest`. `/api/*` mutations additionally
+require a bearer token (see [NETWORK_API.md](NETWORK_API.md)'s "Attribution" section);
+the token identifies which Discord user a mutation is attributed to, but firewalling
+is still what controls who can reach the port at all.
+
+The external Chisel endpoints (`/chisel/poll`, `/chisel/callback/*`) are additionally
+reachable from outside the cluster via `CHISEL_PUBLIC_URL`; that path is protected by
+basic auth at the ingress, not by the Quart app.
 
 ## Development
 
@@ -287,3 +337,7 @@ cd plugin && ./gradlew clean build
 
 - [PROTOCOL.md](PROTOCOL.md) - JSON wire format (plugin -> server)
 - [SCHEMA.md](SCHEMA.md) - SQLite schema and fingerprinting algorithm
+- [NETWORK_API.md](NETWORK_API.md) - `/api/*` HTTP endpoint reference
+- [server/cli/README.md](server/cli/README.md) - `exctl` CLI usage
+- [heap-logger/README.md](heap-logger/README.md) - heap dump leak detection service
+- [pr-bot/README.md](pr-bot/README.md) - GitHub PR tracking bot (unrelated to exception tracking)

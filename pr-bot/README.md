@@ -12,7 +12,7 @@ A Discord bot that keeps `#pending-prs` reactions in sync with GitHub pull reque
 - Keeps each message's reactions matching the true PR state:
   - ✅ every linked PR approved
   - 💬 any open PR needs changes (or has a comment from someone **other than** the
-    PR author, configurable — a PR author commenting on their own PR never triggers 💬)
+    PR author, configurable; a PR author commenting on their own PR never triggers 💬)
   - 🔀 all PRs merged (override with your `:merged:` custom emoji)
   - ❌ all PRs closed, at least one without merging
   - ❓ message has no PR links
@@ -44,11 +44,11 @@ python server.py
 
 | Variable | Default | Required | Description |
 |---|---|---|---|
-| `DISCORD_TOKEN` | — | ✓ | Bot token |
-| `DISCORD_CHANNEL` | — | ✓ | `#pending-prs` channel ID |
-| `GITHUB_REPOS` | — | ✓ | Comma-separated `owner/name` repos to track |
-| `GITHUB_WEBHOOK_SECRET` | — | ✓ | HMAC secret shared with the GitHub webhook |
-| `GITHUB_API_TOKEN` | — | ✓ | Read-only GitHub PAT for on-ingest and startup state fetches |
+| `DISCORD_TOKEN` | - | Yes | Bot token |
+| `DISCORD_CHANNEL` | - | Yes | `#pending-prs` channel ID |
+| `GITHUB_REPOS` | - | Yes | Comma-separated `owner/name` repos to track |
+| `GITHUB_WEBHOOK_SECRET` | - | Yes | HMAC secret shared with the GitHub webhook |
+| `GITHUB_API_TOKEN` | - | Yes | Read-only GitHub PAT for on-ingest and startup state fetches |
 | `DB_PATH` | `prbot.db` | | SQLite path |
 | `PORT` | `8080` | | HTTP port |
 | `PR_RETENTION_DAYS` | `21` | | Delete tracking rows older than this many days |
@@ -76,12 +76,12 @@ python server.py
 
 Logging is two-tiered, controlled by `VERBOSE`:
 
-- **`INFO` (always on)** — the meaningful events: bot login, new/edited/deleted
+- **`INFO` (always on)**: the meaningful events: bot login, new/edited/deleted
   `#pending-prs` messages, accepted GitHub webhooks, PR state transitions
   (approved / changes requested / commented / merged / closed), reaction sets that
   actually changed, DMs sent, startup-reconcile phases and counts, and cleanup
   deletions. This is what you get with `VERBOSE=false`.
-- **`DEBUG` (verbose, the default)** — per-message ingest detail, parsed link sets,
+- **`DEBUG` (verbose, the default)**: per-message ingest detail, parsed link sets,
   GitHub REST requests/responses, no-op reconciles, ignored webhook events,
   suppressed DMs, and slash-command invocations.
 
@@ -108,7 +108,7 @@ See `deployment.yml` for the Kubernetes manifest (Ingress + Service + Deployment
 
 ### Generating `GITHUB_WEBHOOK_SECRET`
 
-The webhook secret is any random high-entropy string — there's no format GitHub
+The webhook secret is any random high-entropy string; there's no format GitHub
 requires. Generate one and use the **same value** in both the GitHub webhook config
 and the k8s secret below. For example:
 
@@ -130,10 +130,10 @@ kubectl create secret generic pr-bot \
 
 The token is **read-only**. It is used only for the on-ingest and startup state
 fetches (`GET .../pulls/{n}`, `.../pulls/{n}/reviews`, and
-`.../commits/{sha}/check-runs`) — the bot never writes to GitHub. It needs read
+`.../commits/{sha}/check-runs`); the bot never writes to GitHub. It needs read
 access to every repo in `GITHUB_REPOS`.
 
-**Fine-grained PAT** (recommended) — Repository access: the tracked repos;
+**Fine-grained PAT** (recommended). Repository access: the tracked repos;
 Repository permissions:
 
 | Permission | Access | Why |
@@ -141,15 +141,15 @@ Repository permissions:
 | Metadata | Read | Mandatory baseline for fine-grained tokens |
 | Pull requests | Read | PR merge/close/label state and the reviews list |
 
-> **Note — the 🐶 reaction and the Checks API.** Reading check-run status
+> **Note: the 🐶 reaction and the Checks API.** Reading check-run status
 > (`GET .../commits/{sha}/check-runs`) requires a `Checks` permission that GitHub
-> **does not grant to fine-grained PATs** — the scope was disabled and is not
+> **does not grant to fine-grained PATs**: the scope was disabled and is not
 > selectable when you create one, even though GitHub's own docs still list it.
 > The bot handles this gracefully: it drives the 🐶 reaction from the
 > **`check_suite` webhook payload** instead, so no extra token permission is
 > needed for the common case (it falls back to last-completed-suite-wins for a PR
 > with multiple check suites). The only thing a fine-grained PAT can't do is
-> **refresh check status during startup reconcile** — any failures that happened
+> **refresh check status during startup reconcile**: any failures that happened
 > while the bot was down are picked up on the next `check_suite` webhook rather
 > than at startup. If you want true cross-suite aggregation on startup too, use a
 > classic PAT (scope `repo`) or a GitHub App token, which *can* read the Checks

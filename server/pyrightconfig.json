@@ -3,6 +3,6 @@
   "venvPath": ".",
   "venv": ".venv",
   "typeCheckingMode": "strict",
-  "include": ["tracker", "server.py", "bot.py"],
+  "include": ["tracker", "server.py", "bot.py", "cli"],
   "reportUnusedFunction": "none"
 }

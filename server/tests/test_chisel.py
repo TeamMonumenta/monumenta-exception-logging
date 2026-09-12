@@ -16,7 +16,8 @@ import pytest
 from tracker.config import TrackerConfig
 from tracker.api import Tracker
 from tracker.ingest import parse_event
-from bot import _render_fix_prompt
+from tracker.chisel import FixRequestOutcome, render_fix_prompt, request_fix
+from bot import _fmt_fix_history_lines
 from server import create_app
 from tests.fixtures import EXAMPLE_EVENT, EXAMPLE_EVENT_2
 
@@ -342,7 +343,7 @@ def test_render_substitutes_core_variables(api, fp):
         "{short_id} {exception_class} {message} {stacktrace} "
         "{count} {servers} {first_seen} {last_seen}"
     )
-    rendered = _render_fix_prompt(template, details)
+    rendered = render_fix_prompt(template, details)
     assert details.fingerprint[:8] in rendered
     assert details.exception_class in rendered
     assert str(details.total_count) in rendered
@@ -351,7 +352,7 @@ def test_render_substitutes_core_variables(api, fp):
 def test_render_unknown_variable_left_unchanged(api, fp):
     details = api.get_group_details(fp)
     assert details is not None
-    rendered = _render_fix_prompt("hello {unknown_var} world", details)
+    rendered = render_fix_prompt("hello {unknown_var} world", details)
     assert "{unknown_var}" in rendered
 
 
@@ -365,7 +366,7 @@ def test_render_curly_braces_in_message_safe():
     fp, _ = tracker.ingest_event(parse_event(event))
     details = tracker.get_group_details(fp)
     assert details is not None
-    rendered = _render_fix_prompt("msg: {message}", details)
+    rendered = render_fix_prompt("msg: {message}", details)
     # The normalized message may differ, but the render must not raise
     assert "msg:" in rendered
 
@@ -377,7 +378,7 @@ def test_render_substitutes_all_variables_including_raw_message(api, fp):
         "{short_id} {exception_class} {message} {raw_message} {stacktrace} "
         "{count} {servers} {first_seen} {last_seen}"
     )
-    rendered = _render_fix_prompt(template, details)
+    rendered = render_fix_prompt(template, details)
     assert details.fingerprint[:8] in rendered
     assert details.exception_class in rendered
     assert str(details.total_count) in rendered
@@ -389,7 +390,7 @@ def test_render_raw_message_uses_latest_occurrence(api, fp):
     details = api.get_group_details(fp)
     assert details is not None
     assert details.latest_message is not None
-    rendered = _render_fix_prompt("{raw_message}", details)
+    rendered = render_fix_prompt("{raw_message}", details)
     assert rendered == details.latest_message
 
 
@@ -412,7 +413,7 @@ def test_render_raw_message_falls_back_when_no_occurrences():
     details = tracker.get_group_details(fp)
     assert details is not None
     assert details.latest_message is None
-    rendered = _render_fix_prompt("{raw_message}", details)
+    rendered = render_fix_prompt("{raw_message}", details)
     assert rendered == details.message_template
 
 
@@ -521,3 +522,89 @@ def test_migrate_fingerprints_updates_fix_attempts_on_fingerprint_change():
     ).fetchone()
     assert row is not None
     assert row['fingerprint'] == fp  # restored to the correct fingerprint
+
+
+# ===========================================================================
+# request_fix — shared reaction-handler / HTTP API orchestration
+# ===========================================================================
+
+@pytest.fixture
+def prompt_path(tmp_path):
+    path = tmp_path / "fix_exception_prompt.md"
+    path.write_text("Fix {exception_class}: {message}", encoding="utf-8")
+    return str(path)
+
+
+def test_request_fix_not_configured_when_url_missing(api, fp, prompt_path):
+    result = request_fix(api, fp, "123456789012345678", None, prompt_path)
+    assert result.outcome == FixRequestOutcome.NOT_CONFIGURED
+    assert result.job_id is None
+
+
+def test_request_fix_queues(api, fp, prompt_path):
+    result = request_fix(
+        api, fp, "123456789012345678", "https://example.com", prompt_path
+    )
+    assert result.outcome == FixRequestOutcome.QUEUED
+    assert result.job_id is not None
+    status = api.get_fix_attempt(result.job_id)
+    assert status is not None
+    assert status.fingerprint == fp
+
+
+def test_request_fix_already_active(api, fp, prompt_path):
+    first = request_fix(api, fp, "1", "https://example.com", prompt_path)
+    assert first.outcome == FixRequestOutcome.QUEUED
+    second = request_fix(api, fp, "1", "https://example.com", prompt_path)
+    assert second.outcome == FixRequestOutcome.ALREADY_ACTIVE
+    assert second.job_id is None
+
+
+def test_request_fix_group_not_found(api, prompt_path):
+    result = request_fix(
+        api, "0" * 64, "1", "https://example.com", prompt_path
+    )
+    assert result.outcome == FixRequestOutcome.GROUP_NOT_FOUND
+
+
+def test_request_fix_template_unreadable(api, fp):
+    result = request_fix(
+        api, fp, "1", "https://example.com", "/no/such/path/prompt.md"
+    )
+    assert result.outcome == FixRequestOutcome.TEMPLATE_UNREADABLE
+    assert result.job_id is None
+
+
+def test_request_fix_renders_template_into_rendered_message(api, fp, prompt_path):
+    result = request_fix(
+        api, fp, "1", "https://example.com", prompt_path
+    )
+    job = api.claim_fix_attempt()
+    assert job is not None
+    assert job.job_id == result.job_id
+    assert "Fix " in job.rendered_message
+
+
+# ===========================================================================
+# _fmt_fix_history_lines — /fix-history slash command (§9)
+# ===========================================================================
+
+def test_fix_history_lines_empty():
+    lines = _fmt_fix_history_lines("deadbeef", [])
+    assert lines[0] == "**Fix history: `deadbeef`**"
+    assert "No fix attempts." in lines
+
+
+def test_fix_history_lines_lists_attempts_newest_first(api, fp, prompt_path):
+    request_fix(api, fp, "1", "https://example.com", prompt_path)
+    job = api.claim_fix_attempt()
+    assert job is not None
+    api.complete_fix_attempt(
+        job.job_id, "success", "Fixed!", "summary", "detail",
+        "https://github.com/example/repo/pull/1",
+    )
+    attempts = api.get_fix_attempts_for_group(fp)
+    lines = _fmt_fix_history_lines(fp[:8], attempts)
+    assert any("[success]" in line for line in lines)
+    assert any("Fixed!" in line for line in lines)
+    assert any("https://github.com/example/repo/pull/1" in line for line in lines)
