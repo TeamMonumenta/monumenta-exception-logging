@@ -570,3 +570,54 @@ def test_mutate_sends_the_token_as_a_bearer_header_and_quotes_the_path(monkeypat
     assert captured['body'] is None
     assert captured['token'] == 'sometoken'
     assert 'Muted abcd1234' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Log-event context rendering
+#
+# _details_stub deliberately omits the newer keys, so these also pin that
+# fmt_details stays tolerant of a server older than the CLI.
+# ---------------------------------------------------------------------------
+
+def test_fmt_details_without_log_context():
+    out = exctl.fmt_details(_details_stub())
+    assert 'Logger: com.example.Foo' in out
+    assert 'Caused by:' not in out
+    assert 'Logged as:' not in out
+
+
+def test_fmt_details_renders_level_beside_logger():
+    out = exctl.fmt_details(_details_stub(level='WARN'))
+    assert 'Logger: com.example.Foo [WARN]' in out
+
+
+def test_fmt_details_renders_log_message():
+    out = exctl.fmt_details(_details_stub(
+        latest_log_message='Task #42 for Monumenta generated an exception'))
+    assert 'Logged as: Task #42 for Monumenta generated an exception' in out
+
+
+def test_fmt_details_renders_cause_chain_after_the_trace():
+    out = exctl.fmt_details(_details_stub(cause_chain=[
+        {'class_name': 'java.lang.IllegalArgumentException', 'message': 'World unloaded',
+         'frames': [{'class_name': 'com.playmonumenta.plugins.Depths', 'method': 'run',
+                     'file': 'Depths.java', 'line': 258}]},
+        {'class_name': 'java.lang.NullPointerException', 'message': '', 'frames': []},
+    ]))
+    lines = out.splitlines()
+    assert lines.index('Stack trace:') < lines.index(
+        'Caused by: java.lang.IllegalArgumentException: World unloaded')
+    assert '  at com.playmonumenta.plugins.Depths.run(Depths.java:258)' in lines
+    # A cause with no message renders without a trailing colon.
+    assert 'Caused by: java.lang.NullPointerException' in lines
+
+
+def test_fmt_occurrence_line_shows_log_message_only_when_it_differs():
+    base = {'timestamp': 1700000000, 'server': 'valley', 'message': 'boom'}
+    assert exctl.fmt_occurrence_line(base).endswith('boom')
+    assert exctl.fmt_occurrence_line({**base, 'log_message': ''}).endswith('boom')
+    # A wrapper exception's log message and exception message are the same string;
+    # repeating it would just be noise.
+    assert exctl.fmt_occurrence_line({**base, 'log_message': 'boom'}).endswith('boom')
+    assert exctl.fmt_occurrence_line(
+        {**base, 'log_message': 'Task #42 failed'}).endswith('boom  [Task #42 failed]')

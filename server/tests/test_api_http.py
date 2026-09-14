@@ -168,7 +168,8 @@ def test_occurrence_to_json():
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     o = OccurrenceSummary(timestamp=now, server="build", message="boom")
     data = _occurrence_to_json(o)
-    assert data == {'timestamp': int(now.timestamp()), 'server': 'build', 'message': 'boom'}
+    assert data == {'timestamp': int(now.timestamp()), 'server': 'build',
+                    'message': 'boom', 'log_message': ''}
 
 
 def test_fix_attempt_to_json_pending():
@@ -990,3 +991,44 @@ def test_no_purge_route():
             resp = await client.post('/api/purge', headers=_bearer(tracker))
             assert resp.status_code == 404
     _run(_inner())
+
+
+# ---------------------------------------------------------------------------
+# Log-event context in the group-details JSON
+# ---------------------------------------------------------------------------
+
+def test_details_to_json_log_context_defaults():
+    """A group carrying no log context still emits every documented key."""
+    data = _details_to_json(_make_details())
+    assert data['level'] == ''
+    assert data['log_message_template'] == ''
+    assert data['cause_chain'] == []
+    assert data['latest_log_message'] is None
+
+
+def test_details_to_json_cause_chain():
+    from tracker.api import CauseSummary  # pylint: disable=import-outside-toplevel
+    inner = FrameSummary(class_name="com.example.Deep", method="run", file="Deep.java", line=7)
+    d = _make_details(
+        level='WARN',
+        log_message_template='Task #<N> for Monumenta generated an exception',
+        latest_log_message='Task #42 for Monumenta generated an exception',
+        cause_chain=[
+            CauseSummary(class_name='java.lang.IllegalArgumentException',
+                         message='World unloaded', frames=[inner]),
+            CauseSummary(class_name='java.lang.NullPointerException', message='', frames=[]),
+        ],
+    )
+    data = _details_to_json(d)
+    assert data['level'] == 'WARN'
+    assert data['log_message_template'] == 'Task #<N> for Monumenta generated an exception'
+    assert data['latest_log_message'] == 'Task #42 for Monumenta generated an exception'
+    assert data['cause_chain'] == [
+        {
+            'class_name': 'java.lang.IllegalArgumentException',
+            'message': 'World unloaded',
+            'frames': [{'class_name': 'com.example.Deep', 'method': 'run',
+                        'file': 'Deep.java', 'line': 7}],
+        },
+        {'class_name': 'java.lang.NullPointerException', 'message': '', 'frames': []},
+    ]

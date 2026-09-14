@@ -263,3 +263,253 @@ def test_canonical_frames_limited_to_config_count(fresh_api):
     fp, _ = fresh_api.ingest_event(parse_event(REAL_ILLEGAL_STATE_ASYNC_SOUND))
     details = fresh_api.get_group_details(fp)
     assert len(details.canonical_frames) <= 3
+
+
+# ===========================================================================
+# Log-event context: level, accompanying log message, cause chain
+#
+# All three arrive in the wire payload (PROTOCOL.md) and were validated then
+# discarded before this was added, which is what made a scheduler exception's
+# real cause invisible in the database even though it was being sent.
+# ===========================================================================
+
+# A cause-swallowing wrapper of the shape Paper's scheduler produces: the wrapper's
+# own frames are scheduler machinery, and the real bug is only in the cause.
+_WRAPPED_EVENT = {
+    'schema_version': 1,
+    'server_id': 'valley-2',
+    'timestamp_ms': 1789339168000,
+    'level': 'WARN',
+    'logger': 'Monumenta',
+    'thread': 'Server thread',
+    'message': 'Task #9498967 for Monumenta v11.84.2 generated an exception',
+    'exception': {
+        'class_name': 'com.destroystokyo.paper.exception.ServerSchedulerException',
+        'message': 'Task #9498967 for Monumenta v11.84.2 generated an exception',
+        'frames': [
+            {'class_name': 'org.bukkit.craftbukkit.v1_20_R3.scheduler.CraftScheduler',
+             'method': 'mainThreadHeartbeat', 'file': 'CraftScheduler.java',
+             'line': 497, 'location': None},
+        ],
+        'cause': {
+            'class_name': 'java.lang.IllegalArgumentException',
+            'message': 'World unloaded',
+            'frames': [
+                {'class_name': 'com.playmonumenta.plugins.depths.DepthsUtils$1',
+                 'method': 'run', 'file': 'DepthsUtils.java', 'line': 258,
+                 'location': 'Monumenta.jar'},
+            ],
+            'cause': {
+                'class_name': 'java.lang.NullPointerException',
+                'message': None,
+                'frames': [],
+                'cause': None,
+            },
+        },
+    },
+}
+
+
+def test_level_is_persisted(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    assert fresh_api.get_group_details(fp).level == 'WARN'
+
+
+def test_log_message_is_persisted_normalized_and_raw(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    details = fresh_api.get_group_details(fp)
+    # Normalized on the group, raw on the occurrence - mirroring how the
+    # exception's own message is stored. Asserted on the task id rather than the
+    # whole string so this does not also pin how versions normalize.
+    assert details.log_message_template.startswith('Task #<N> for Monumenta')
+    assert '9498967' not in details.log_message_template
+    assert details.latest_log_message == \
+        'Task #9498967 for Monumenta v11.84.2 generated an exception'
+    assert fresh_api.get_recent_occurrences(fp)[0].log_message == \
+        'Task #9498967 for Monumenta v11.84.2 generated an exception'
+
+
+def test_cause_chain_is_persisted_outermost_first(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    chain = fresh_api.get_group_details(fp).cause_chain
+    # The wrapper itself is not in the chain - only what it wrapped.
+    assert [c.class_name for c in chain] == [
+        'java.lang.IllegalArgumentException', 'java.lang.NullPointerException',
+    ]
+    assert chain[0].message == 'World unloaded'
+    assert chain[0].frames[0].class_name == 'com.playmonumenta.plugins.depths.DepthsUtils$1'
+    assert chain[0].frames[0].line == 258
+    # A null message normalizes to empty rather than None, matching message_template.
+    assert chain[1].message == ''
+
+
+def test_cause_chain_is_empty_when_there_is_no_cause(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(REAL_NPE_ALLAY))
+    assert fresh_api.get_group_details(fp).cause_chain == []
+
+
+def test_log_context_does_not_affect_the_fingerprint(fresh_api):
+    """level/log message/cause are context, not identity.
+
+    Two events identical except for these fields must stay one group, or every
+    scheduler task id would create a new one.
+    """
+    import copy  # pylint: disable=import-outside-toplevel
+    other = copy.deepcopy(_WRAPPED_EVENT)
+    other['level'] = 'ERROR'
+    other['message'] = 'Task #11111 for Monumenta v11.84.2 generated an exception'
+    other['exception']['cause'] = None
+    fp_a, new_a = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    fp_b, new_b = fresh_api.ingest_event(parse_event(other))
+    assert fp_a == fp_b
+    assert new_a is True and new_b is False
+
+
+def test_group_context_is_captured_from_the_first_occurrence_only(fresh_api):
+    """Matches how logger and canonical_trace already behave."""
+    import copy  # pylint: disable=import-outside-toplevel
+    later = copy.deepcopy(_WRAPPED_EVENT)
+    later['level'] = 'ERROR'
+    later['exception']['cause'] = None
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    fresh_api.ingest_event(parse_event(later))
+    details = fresh_api.get_group_details(fp)
+    assert details.level == 'WARN'
+    assert len(details.cause_chain) == 2
+
+
+def _create_pre_migration_db(db_path: str) -> None:
+    """Create the two tables in their shape before the log-context columns existed.
+
+    Written out rather than derived from the current schema, so the test keeps
+    describing the old deployment even as the current schema moves on.
+    _create_tables uses CREATE TABLE IF NOT EXISTS, so it leaves these alone and
+    fills in the rest. has_activity is omitted too, exercising the oldest
+    migration entry as well as the new ones.
+    """
+    import sqlite3  # pylint: disable=import-outside-toplevel
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE error_groups (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            fingerprint        TEXT NOT NULL UNIQUE,
+            exception_class    TEXT NOT NULL,
+            message_template   TEXT NOT NULL,
+            canonical_frames   TEXT NOT NULL,
+            canonical_trace    TEXT NOT NULL,
+            logger             TEXT NOT NULL,
+            first_seen         INTEGER NOT NULL,
+            last_seen          INTEGER NOT NULL,
+            total_count        INTEGER NOT NULL DEFAULT 0,
+            status             TEXT NOT NULL DEFAULT 'active'
+                               CHECK (status IN ('active', 'muted', 'resolved')),
+            discord_message_id TEXT,
+            muted_by           TEXT,
+            muted_at           INTEGER,
+            resolved_by        TEXT,
+            resolved_at        INTEGER
+        );
+        CREATE TABLE occurrences (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id   INTEGER NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
+            server     TEXT NOT NULL,
+            timestamp  INTEGER NOT NULL,
+            message    TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def test_migration_adds_columns_to_a_pre_existing_database(tmp_path):
+    """An existing deployment's DB predates these columns and cannot be backfilled.
+
+    Opening it must add them with defaults rather than failing, and ingest must
+    work afterwards.
+    """
+    db_path = str(tmp_path / 'old.db')
+    _create_pre_migration_db(db_path)
+
+    api = Tracker(TrackerConfig(db_path=db_path))
+    fp, is_new = api.ingest_event(parse_event(_WRAPPED_EVENT))
+    assert is_new is True
+    details = api.get_group_details(fp)
+    assert details.level == 'WARN'
+    assert len(details.cause_chain) == 2
+    api.close()
+
+    # Reopening an already-migrated DB is a no-op and must not raise. Ingesting
+    # again exercises the UPDATE path, and so the migrated has_activity column.
+    api2 = Tracker(TrackerConfig(db_path=db_path))
+    _, is_new_again = api2.ingest_event(parse_event(_WRAPPED_EVENT))
+    assert is_new_again is False
+    assert api2.get_group_details(fp).total_count == 2
+    api2.close()
+
+
+def test_migration_leaves_pre_existing_rows_readable(tmp_path):
+    """A row written before the columns existed must read back through the API.
+
+    The data was discarded at ingest time, so it cannot be backfilled with
+    anything real - it must come back empty rather than NULL-crashing callers.
+    """
+    import sqlite3  # pylint: disable=import-outside-toplevel
+
+    db_path = str(tmp_path / 'rows.db')
+    _create_pre_migration_db(db_path)
+
+    # A group and occurrence written by the old code, with no knowledge of the
+    # new columns.
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO error_groups (fingerprint, exception_class, message_template, "
+        "canonical_frames, canonical_trace, logger, first_seen, last_seen, total_count, "
+        "status) VALUES (?, 'java.lang.RuntimeException', 'old', '[]', '[]', 'Monumenta', "
+        "1700000000, 1700000000, 1, 'active')",
+        ('f' * 64,)
+    )
+    conn.execute("INSERT INTO occurrences (group_id, server, timestamp, message) "
+                 "VALUES (1, 'valley', 1700000000, 'old raw')")
+    conn.commit()
+    conn.close()
+
+    api = Tracker(TrackerConfig(db_path=db_path))
+    details = api.get_group_details('f' * 64)
+    assert details.level == ''
+    assert details.log_message_template == ''
+    assert not details.cause_chain
+    assert details.latest_log_message == ''
+    assert api.get_recent_occurrences('f' * 64)[0].log_message == ''
+    # And the pre-existing row still takes updates, exercising has_activity too.
+    api.ingest_event(parse_event(REAL_NPE_ALLAY))
+    api.close()
+
+
+def test_cause_chain_depth_is_capped(fresh_api):
+    """/ingest is unauthenticated, so the plugin's depth budget is not trusted."""
+    import copy  # pylint: disable=import-outside-toplevel
+    from tracker.ingest import MAX_CAUSE_DEPTH  # pylint: disable=import-outside-toplevel
+
+    deep = copy.deepcopy(_WRAPPED_EVENT)
+    node = deep['exception']
+    for i in range(MAX_CAUSE_DEPTH + 10):
+        node['cause'] = {'class_name': f'java.lang.Nested{i}', 'message': None,
+                         'frames': [], 'cause': None}
+        node = node['cause']
+    fp, _ = fresh_api.ingest_event(parse_event(deep))
+    assert len(fresh_api.get_group_details(fp).cause_chain) == MAX_CAUSE_DEPTH
+
+
+def test_cause_chain_frames_are_capped(fresh_api):
+    import copy  # pylint: disable=import-outside-toplevel
+    from tracker.ingest import MAX_CAUSE_FRAMES  # pylint: disable=import-outside-toplevel
+
+    wide = copy.deepcopy(_WRAPPED_EVENT)
+    wide['exception']['cause']['frames'] = [
+        {'class_name': f'com.example.C{i}', 'method': 'run', 'file': None,
+         'line': -1, 'location': None}
+        for i in range(MAX_CAUSE_FRAMES * 3)
+    ]
+    fp, _ = fresh_api.ingest_event(parse_event(wide))
+    assert len(fresh_api.get_group_details(fp).cause_chain[0].frames) == MAX_CAUSE_FRAMES

@@ -61,8 +61,8 @@ tokens are swept during the hourly expiry pass.
 |---|---|---|---|
 | `GET` | `/api/health` | - | `{"ok": true}` |
 | `GET` | `/api/groups` | `status, server, search, new_within_hours, window_hours=24, sort, limit=50 (<=500), offset=0` | `{groups: [...], total: N}`. |
-| `GET` | `/api/groups/<id>` | - | Full group details JSON; `404` if unknown. |
-| `GET` | `/api/groups/<id>/occurrences` | `limit=20` (<=500) | `{occurrences: [...]}`. Raw, un-normalized messages, newest first. |
+| `GET` | `/api/groups/<id>` | - | Full group details JSON; `404` if unknown. Includes `level`, `log_message_template` and `cause_chain` (captured from the group's first occurrence, like `logger` and `canonical_trace`), plus `latest_log_message`. `cause_chain` is an array of `{class_name, message, frames}`, outermost cause first, empty when the exception had none. |
+| `GET` | `/api/groups/<id>/occurrences` | `limit=20` (<=500) | `{occurrences: [...]}`. Raw, un-normalized messages, newest first. Each carries `log_message`, the raw accompanying log message, which is often where per-event context lives (Paper's scheduler puts the task id there). |
 | `GET` | `/api/groups/<id>/fix-attempts` | `limit=20` (<=500) | `{fix_attempts: [...]}`, newest first. |
 | `GET` | `/api/fix-attempts/<job_id>` | - | Single fix attempt's status; `404` if unknown. |
 | `GET` | `/api/servers` | - | `{"servers": [...]}` |

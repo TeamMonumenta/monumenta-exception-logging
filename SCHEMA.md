@@ -17,6 +17,9 @@ CREATE TABLE error_groups (
     canonical_frames   TEXT NOT NULL,              -- JSON array of top app frames used for fingerprinting
     canonical_trace    TEXT NOT NULL,              -- JSON full stack trace from the first-ever occurrence
     logger             TEXT NOT NULL,              -- logger name from first occurrence
+    level              TEXT NOT NULL DEFAULT '',   -- log level from first occurrence, e.g. "WARN"
+    log_message_template TEXT NOT NULL DEFAULT '', -- normalized accompanying log message (NOT the exception's)
+    cause_chain        TEXT NOT NULL DEFAULT '[]', -- JSON array of chained causes, outermost first (<= 4)
     first_seen         INTEGER NOT NULL,
     last_seen          INTEGER NOT NULL,
     total_count        INTEGER NOT NULL DEFAULT 0,
@@ -58,7 +61,8 @@ CREATE TABLE occurrences (
     group_id   INTEGER NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
     server     TEXT NOT NULL,
     timestamp  INTEGER NOT NULL,
-    message    TEXT NOT NULL    -- raw (un-normalized) exception message from the event
+    message    TEXT NOT NULL,   -- raw (un-normalized) exception message from the event
+    log_message TEXT NOT NULL DEFAULT ''  -- raw accompanying log message from the event
 );
 
 CREATE INDEX idx_occurrences_group_timestamp ON occurrences(group_id, timestamp);
@@ -255,6 +259,17 @@ The fingerprint is computed by the Python ingest service from the raw event. It 
 
    Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`. Versions are consumed before the number rule, so the abbreviated git hash isn't fragmented into `g<N>` noise.
 3. `top_app_frames`: the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
+
+**Log-event context is stored but never fingerprinted.** `level`, `log_message_template` and
+`cause_chain` are captured on the group's first occurrence, the same way `logger` and
+`canonical_trace` are, and are excluded from the hash deliberately: the accompanying log message
+varies per event (Paper's scheduler puts the task id in it), and folding either it or the cause
+into the fingerprint would split one bug across many groups. They exist so that questions about
+*how* an exception was reported are answerable from the database.
+
+Like `logger` and `canonical_trace`, they are captured on insert and never updated, so after a
+re-fingerprint merge they describe whichever group won rather than the earliest occurrence.
+Nothing here is fingerprinted, so this cannot split or mis-group anything.
 
 **Hash:**
 ```python

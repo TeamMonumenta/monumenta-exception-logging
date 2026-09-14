@@ -15,7 +15,7 @@ and is documented independently.
 ### Java Plugin (`plugin/`)
 
 A lightweight Paper plugin that attaches a custom Log4j2 appender to each server process. On every
-ERROR-level log event with a throwable, the appender:
+log event at or above `EXCEPTLOG_MIN_LEVEL` (default `INFO`) that carries a throwable, the appender:
 
 - Extracts the exception class, message, and full stack trace
 - Serializes them as JSON ([PROTOCOL.md](PROTOCOL.md))
@@ -32,8 +32,32 @@ The plugin is configured via environment variables for simplicity in a docker/ku
 | `EXCEPTLOG_INGEST_URL` | Full URL of the Python server's `POST /ingest` endpoint |
 | `EXCEPTLOG_SERVER_NAME` | Server identity included in every event; falls back to hostname |
 | `EXCEPTLOG_VERBOSE` | Set to any non-empty value other than `false` to enable verbose logging (logs every exception queued and each successful POST) |
+| `EXCEPTLOG_MIN_LEVEL` | Minimum Log4j2 level to report (default: `INFO`). Events below this are dropped before the rate limiter sees them. **Do not set this to `ERROR`** without reading "Reporting threshold" below - it silently discards most of what this tracker usefully reports. An unrecognized name falls back to `INFO`; `OFF` is rejected with a warning (unset `EXCEPTLOG_INGEST_URL` to disable reporting instead). Values below `INFO` (`DEBUG`, `TRACE`, `ALL`) have no additional effect, since Paper's root logger is already capped at `INFO`. |
 | `HEAPLOG_INGEST_URL` | URL of the heap-logger's `POST /ingest` endpoint (e.g. `http://heap-logger.<ns>.svc.cluster.local:8081/ingest`). If unset, heap dump reporting is disabled. When set, the always-on log watcher reports heap dumps whenever `/spark heapdump` is run (manually or triggered by another plugin). spark must be present. |
 | `HEAPLOG_AUTO_DUMP` | Set to any non-empty value other than `false` to automatically trigger a heap dump via `spark heapdump` when a `LowMemoryEvent` is received from MonumentaNetworkRelay. Default: off (log watcher still runs; only manual dumps are reported). Requires `HEAPLOG_INGEST_URL` to be set and MonumentaNetworkRelay to be present. |
+
+#### Reporting threshold
+
+`EXCEPTLOG_MIN_LEVEL` defaults to `INFO`, and **must not be raised to `ERROR`**.
+
+Paper's `CraftScheduler.mainThreadHeartbeat` (sync tasks) and `CraftAsyncTask.run` (async) both
+catch whatever a scheduled task threw and log **the original exception** at `Level.WARNING`,
+through the owning plugin's logger. Mojang's authlib logs session-service failures at `warn` as
+well. Between them, that is the majority of what this tracker reports - including its single
+largest group. An `ERROR`-only threshold drops all of it, and does so silently: nothing fails,
+the data just stops arriving.
+
+That threshold used to be absent rather than chosen. The appender is attached with
+`Logger.addAppender(Appender)`, which registers it with no level threshold at all, so it
+received everything reaching the root `LoggerConfig` - `INFO` and above, per the `<Root
+level="info">` in Paper's bundled `log4j2.xml` - while the docs claimed `ERROR`-only. The
+default here is `INFO` so that making the threshold explicit does not, by itself, change what
+is captured.
+
+`WARN` is the likely eventual default: `INFO`-with-a-throwable is an odd thing to log, and
+probably rare. But "probably" is doing real work in that sentence, and until the `level` column
+added alongside this has a retention window of data in it, nobody can say what narrowing would
+actually cost. Read the histogram first, then decide.
 
 ### In-game commands
 

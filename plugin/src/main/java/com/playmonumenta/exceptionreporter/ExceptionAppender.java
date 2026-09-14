@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.Appender;
@@ -26,12 +27,14 @@ public class ExceptionAppender extends AbstractAppender {
 	private final AtomicInteger mEventsThisSecond = new AtomicInteger(0);
 	private final String mServerId;
 	private final HttpSender mSender;
+	private final Level mMinLevel;
 	private volatile @Nullable Thread mRateLimitThread;
 
-	protected ExceptionAppender(String serverId, HttpSender sender) {
+	protected ExceptionAppender(String serverId, HttpSender sender, Level minLevel) {
 		super("MonumentaExceptionReporter", null, null, true, Property.EMPTY_ARRAY);
 		mServerId = serverId;
 		mSender = sender;
+		mMinLevel = minLevel;
 	}
 
 	@Override
@@ -66,6 +69,20 @@ public class ExceptionAppender extends AbstractAppender {
 	public void append(LogEvent event) {
 		Throwable thrown = event.getThrown();
 		if (thrown == null) {
+			return;
+		}
+		// The appender is attached with Logger.addAppender(Appender), which registers
+		// it with no level threshold, so it receives everything that reaches the root
+		// LoggerConfig (INFO and above, per Paper's log4j2.xml). Filter here instead.
+		//
+		// Whatever this is set to, it must stay below ERROR: Paper's CraftScheduler and
+		// CraftAsyncTask log an escaped task's exception at WARNING through the owning
+		// plugin's logger, as does authlib's session service, and between them that is
+		// most of what this tracker usefully reports. See the README.
+		//
+		// Checked before the rate-limit counter so filtered events don't consume
+		// budget that a reportable event on the same second needs.
+		if (!event.getLevel().isMoreSpecificThan(mMinLevel)) {
 			return;
 		}
 		if (mEventsThisSecond.getAndIncrement() >= MAX_EVENTS_PER_SECOND) {

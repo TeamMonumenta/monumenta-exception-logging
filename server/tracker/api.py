@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -31,6 +31,18 @@ class FrameSummary:
     method: str
     file: Optional[str]
     line: int  # -1 if unknown (native method or compiled without debug info)
+
+
+@dataclass
+class CauseSummary:
+    """One link in an exception's chained-cause list.
+
+    Populated from the `cause` field the plugin already sends (PROTOCOL.md) and
+    captured from the group's first occurrence, alongside canonical_trace.
+    """
+    class_name: str
+    message: str
+    frames: list[FrameSummary]
 
 
 @dataclass
@@ -71,6 +83,7 @@ class OccurrenceSummary:
     timestamp: datetime
     server: str
     message: str
+    log_message: str = ''  # raw accompanying log message for this occurrence
 
 
 @dataclass
@@ -88,7 +101,12 @@ class GroupDetails:
     servers_affected: list[str]           # servers seen within the retention window
     server_counts_24h: dict[str, int]     # fixed 24-hour window
     hourly_timeline: list[tuple[datetime, int]]  # (hour_start, count), fixed 7-day window
+    level: str = ''                       # log level, from the first occurrence
+    log_message_template: str = ''        # normalized accompanying log message, first occurrence
+    # Chained causes from the first occurrence only, outermost first.
+    cause_chain: list[CauseSummary] = field(default_factory=list[CauseSummary])
     latest_message: Optional[str] = None  # most recent raw (un-normalized) exception message
+    latest_log_message: Optional[str] = None  # most recent raw accompanying log message
     muted_by: Optional[str] = None
     muted_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
@@ -110,6 +128,25 @@ def _frames_from_json(json_str: str) -> list[FrameSummary]:
             line=f.get('line', -1),
         )
         for f in json.loads(json_str)
+    ]
+
+
+def _causes_from_json(json_str: str) -> list[CauseSummary]:
+    return [
+        CauseSummary(
+            class_name=c['class_name'],
+            message=c.get('message', ''),
+            frames=[
+                FrameSummary(
+                    class_name=f['class_name'],
+                    method=f['method'],
+                    file=f.get('file'),
+                    line=f.get('line', -1),
+                )
+                for f in c.get('frames', [])
+            ],
+        )
+        for c in json.loads(json_str or '[]')
     ]
 
 
@@ -282,7 +319,8 @@ class Tracker:
         row = self._conn.execute(
             """SELECT id, fingerprint, exception_class, message_template,
                       status, first_seen, last_seen, total_count,
-                      logger, canonical_frames, canonical_trace,
+                      logger, level, log_message_template, cause_chain,
+                      canonical_frames, canonical_trace,
                       muted_by, muted_at, resolved_by, resolved_at
                FROM error_groups
                WHERE fingerprint = ?""",
@@ -312,10 +350,14 @@ class Tracker:
         ).fetchall()
 
         latest_msg_row = self._conn.execute(
-            "SELECT message FROM occurrences WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1",
+            "SELECT message, log_message FROM occurrences "
+            "WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1",
             (group_id,)
         ).fetchone()
         latest_message = latest_msg_row['message'] if latest_msg_row is not None else None
+        latest_log_message = (
+            latest_msg_row['log_message'] if latest_msg_row is not None else None
+        )
 
         return GroupDetails(
             fingerprint=row['fingerprint'],
@@ -331,7 +373,11 @@ class Tracker:
             servers_affected=[r['server'] for r in server_rows],
             server_counts_24h=self._get_server_counts(group_id, cutoff_24h),
             hourly_timeline=[(_ts_to_dt(r['hour']), r['count']) for r in timeline_rows],
+            level=row['level'],
+            log_message_template=row['log_message_template'],
+            cause_chain=_causes_from_json(row['cause_chain']),
             latest_message=latest_message,
+            latest_log_message=latest_log_message,
             muted_by=row['muted_by'],
             muted_at=_ts_to_dt(row['muted_at']) if row['muted_at'] is not None else None,
             resolved_by=row['resolved_by'],
@@ -603,13 +649,13 @@ class Tracker:
             return []
         limit = _clamp_int(limit, 0, _LIST_GROUPS_MAX_LIMIT)
         rows = self._conn.execute(
-            "SELECT timestamp, server, message FROM occurrences WHERE group_id = ? "
-            "ORDER BY timestamp DESC LIMIT ?",
+            "SELECT timestamp, server, message, log_message FROM occurrences "
+            "WHERE group_id = ? ORDER BY timestamp DESC LIMIT ?",
             (group_row['id'], limit)
         ).fetchall()
         return [
             OccurrenceSummary(timestamp=_ts_to_dt(row['timestamp']), server=row['server'],
-                               message=row['message'])
+                               message=row['message'], log_message=row['log_message'])
             for row in rows
         ]
 

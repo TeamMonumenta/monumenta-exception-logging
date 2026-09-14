@@ -11,7 +11,8 @@ from quart import Quart, jsonify, request
 from werkzeug.exceptions import HTTPException, InternalServerError
 
 from tracker.api import (
-    FixAttemptStatus, FrameSummary, GroupDetails, GroupSummary, OccurrenceSummary, Tracker,
+    CauseSummary, FixAttemptStatus, FrameSummary, GroupDetails, GroupSummary,
+    OccurrenceSummary, Tracker,
 )
 from tracker.chisel import FixRequestOutcome, request_fix
 from tracker.config import from_env
@@ -68,6 +69,14 @@ def _frame_to_json(frame: FrameSummary) -> dict[str, Any]:
     }
 
 
+def _cause_to_json(cause: CauseSummary) -> dict[str, Any]:
+    return {
+        'class_name': cause.class_name,
+        'message': cause.message,
+        'frames': [_frame_to_json(f) for f in cause.frames],
+    }
+
+
 def _summary_to_json(g: GroupSummary) -> dict[str, Any]:
     return {
         'fingerprint': g.fingerprint,
@@ -92,12 +101,16 @@ def _details_to_json(d: GroupDetails) -> dict[str, Any]:
         'last_seen': int(d.last_seen.timestamp()),
         'total_count': d.total_count,
         'logger': d.logger,
+        'level': d.level,
+        'log_message_template': d.log_message_template,
+        'cause_chain': [_cause_to_json(c) for c in d.cause_chain],
         'canonical_frames': [_frame_to_json(f) for f in d.canonical_frames],
         'canonical_trace': [_frame_to_json(f) for f in d.canonical_trace],
         'servers_affected': d.servers_affected,
         'server_counts_24h': d.server_counts_24h,
         'hourly_timeline': [[int(ts.timestamp()), count] for ts, count in d.hourly_timeline],
         'latest_message': d.latest_message,
+        'latest_log_message': d.latest_log_message,
         'muted_by': d.muted_by,
         'muted_at': int(d.muted_at.timestamp()) if d.muted_at is not None else None,
         'resolved_by': d.resolved_by,
@@ -110,6 +123,7 @@ def _occurrence_to_json(o: OccurrenceSummary) -> dict[str, Any]:
         'timestamp': int(o.timestamp.timestamp()),
         'server': o.server,
         'message': o.message,
+        'log_message': o.log_message,
     }
 
 

@@ -46,10 +46,10 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | `schema_version` | integer | Always `1` for this version. Used by the server to handle future format changes. |
 | `server_id` | string | Identifies the originating server. Read from `EXCEPTLOG_SERVER_NAME` env var at plugin startup. Falls back to hostname if env var is absent. |
 | `timestamp_ms` | integer | Unix timestamp in milliseconds (UTC) when the log event was emitted. From `LogEvent.getTimeMillis()`. |
-| `level` | string | Log level string. Will always be `"ERROR"` in practice since the plugin only captures ERROR-level events, but included for completeness. |
+| `level` | string | Log level string of the originating event, e.g. `"WARN"` or `"ERROR"`. The plugin reports everything at or above `EXCEPTLOG_MIN_LEVEL` (default `INFO`), so this genuinely varies - see "Reporting threshold" in the README. Persisted by the server on the group's first occurrence. |
 | `logger` | string | The Log4j2 logger name that emitted the event. Typically the fully-qualified plugin class name, e.g. `com.playmonumenta.plugins.Plugin`. |
 | `thread` | string | Name of the thread that logged the event, e.g. `"Server thread"`. From `LogEvent.getThreadName()`. |
-| `message` | string | The human-readable log message that accompanied the exception, e.g. `"Failed to load boss!"`. This is the message passed to `logger.error(...)`, not the exception message. May be empty string if no message was provided. |
+| `message` | string | The human-readable log message that accompanied the exception, e.g. `"Failed to load boss!"`. This is the message passed to `logger.error(...)`, not the exception message. May be empty string if no message was provided. Often carries context the exception's own message does not - Paper's scheduler puts the task id and owning plugin here. Persisted both normalized (`error_groups.log_message_template`) and raw per-occurrence (`occurrences.log_message`). Not part of the fingerprint. |
 | `exception` | object | The captured exception. Always present (events without a throwable are filtered by the plugin before sending). |
 
 ### `exception` Object
@@ -59,7 +59,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | `class_name` | string | Fully-qualified exception class name, e.g. `"java.lang.NullPointerException"` or `"com.playmonumenta.plugins.SomeCustomException"`. |
 | `message` | string \| null | The exception's own message (`e.getMessage()`). Null if no message was set. May contain variable content (player names, coordinates, etc.) - the server normalizes this for fingerprinting. |
 | `frames` | array | Ordered list of stack frames, from closest to throw site (index 0) to oldest caller. See Frame Object below. Includes all frames; the server filters for application frames during fingerprinting. |
-| `cause` | object \| null | The chained cause exception, if any (`e.getCause()`). Same structure as `exception`. Cause chains are captured up to a depth of 5 to prevent unbounded nesting. |
+| `cause` | object \| null | The chained cause exception, if any (`e.getCause()`). Same structure as `exception`. Cause chains are captured up to a depth of 5 to prevent unbounded nesting; that budget includes the outermost throwable, so a well-behaved payload carries at most 4 causes. Persisted by the server as `error_groups.cause_chain` on the group's first occurrence, and exposed as `cause_chain` on `GET /api/groups/<id>`. `/ingest` is unauthenticated, so the server re-applies its own caps (`MAX_CAUSE_DEPTH`, `MAX_CAUSE_FRAMES` in `tracker/ingest.py`) rather than trusting the plugin's. Not part of the fingerprint. |
 
 ### Frame Object
 
@@ -80,29 +80,38 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 - `LogEvent.getThrown()` gives direct Throwable access without going through JUL's `LogRecord`.
 - More precise filtering is possible at the Log4j2 level.
 
-**Appender attachment pattern:**
+**Appender attachment pattern:** attach to the core root `Logger` directly, not via
+`LogManager.getContext(false)` - called from a plugin classloader that can return a *child*
+context, whose appenders never see server-level events.
+
 ```java
-LoggerContext context = (LoggerContext) LogManager.getContext(false);
-Configuration config = context.getConfiguration();
-ExceptionReporterAppender appender = new ExceptionReporterAppender(/* config */);
+ExceptionAppender appender = new ExceptionAppender(serverId, sender, minLevel);
 appender.start();
-config.addAppender(appender);
-config.getRootLogger().addAppender(appender, Level.ERROR, null);
-context.updateLoggers();
+((org.apache.logging.log4j.core.Logger) LogManager.getRootLogger()).addAppender(appender);
 ```
+
+Note that this overload registers the appender with **no level threshold** - it delegates to
+`LoggerConfig.addAppender(appender, null, null)`. The appender therefore receives everything
+that reaches the root `LoggerConfig`, and must do its own level filtering (see Event Filtering
+below). The `addAppender(appender, Level.ERROR, null)` overload is not usable here because it
+lives on `LoggerConfig`, which is reached through the context this pattern deliberately avoids.
 
 Remove the appender on plugin disable:
 ```java
-config.getRootLogger().removeAppender("ExceptionReporter");
+((org.apache.logging.log4j.core.Logger) LogManager.getRootLogger()).removeAppender(appender);
 appender.stop();
-context.updateLoggers();
 ```
 
 ### Event Filtering
 
-The appender should skip events that:
+The appender skips events that:
 - Have no throwable (`logEvent.getThrown() == null`)
-- Are below ERROR level (enforced by the level filter on `addAppender`)
+- Are below `EXCEPTLOG_MIN_LEVEL` (default `INFO`)
+
+Both checks happen in `append()`, before the rate-limit counter, so filtered events do not
+consume budget a reportable event on the same second needs. The level check cannot be delegated
+to `addAppender`: the appender is attached with `Logger.addAppender(Appender)`, which registers
+it with **no** level threshold.
 
 ### HTTP Client
 
@@ -127,7 +136,8 @@ leak patterns detected via heap dump analysis. It POSTs synthetic exceptions dir
 to the exception-logger's `POST /ingest` endpoint, bypassing the Java plugin entirely.
 
 These synthetic events use fixed, stable field values so that the fingerprinting algorithm
-groups the same leak pattern consistently across servers and over time:
+groups the same leak pattern consistently across servers and over time. Because they are POSTed
+straight to `/ingest`, `EXCEPTLOG_MIN_LEVEL` does not apply to them.
 
 | Field | Value |
 |---|---|
