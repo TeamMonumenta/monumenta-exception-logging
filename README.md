@@ -47,17 +47,13 @@ well. Between them, that is the majority of what this tracker reports - includin
 largest group. An `ERROR`-only threshold drops all of it, and does so silently: nothing fails,
 the data just stops arriving.
 
-That threshold used to be absent rather than chosen. The appender is attached with
-`Logger.addAppender(Appender)`, which registers it with no level threshold at all, so it
-received everything reaching the root `LoggerConfig` - `INFO` and above, per the `<Root
-level="info">` in Paper's bundled `log4j2.xml` - while the docs claimed `ERROR`-only. The
-default here is `INFO` so that making the threshold explicit does not, by itself, change what
-is captured.
+`INFO` is as low as the threshold can usefully go: the appender is attached with
+`Logger.addAppender(Appender)`, which registers it with no level threshold, so it sees whatever
+reaches the root `LoggerConfig` - `INFO` and above, per the `<Root level="info">` in Paper's
+bundled `log4j2.xml`.
 
-`WARN` is the likely eventual default: `INFO`-with-a-throwable is an odd thing to log, and
-probably rare. But "probably" is doing real work in that sentence, and until the `level` column
-added alongside this has a retention window of data in it, nobody can say what narrowing would
-actually cost. Read the histogram first, then decide.
+`WARN` is a plausible future default, on the theory that `INFO`-with-a-throwable is rare. Check
+that against the `level` column before changing it rather than assuming.
 
 ### In-game commands
 

@@ -71,17 +71,10 @@ public class ExceptionAppender extends AbstractAppender {
 		if (thrown == null) {
 			return;
 		}
-		// The appender is attached with Logger.addAppender(Appender), which registers
-		// it with no level threshold, so it receives everything that reaches the root
-		// LoggerConfig (INFO and above, per Paper's log4j2.xml). Filter here instead.
-		//
-		// Whatever this is set to, it must stay below ERROR: Paper's CraftScheduler and
-		// CraftAsyncTask log an escaped task's exception at WARNING through the owning
-		// plugin's logger, as does authlib's session service, and between them that is
-		// most of what this tracker usefully reports. See the README.
-		//
-		// Checked before the rate-limit counter so filtered events don't consume
-		// budget that a reportable event on the same second needs.
+		// Attaching via Logger.addAppender(Appender) registers with no level
+		// threshold, so the filtering has to happen here. Before the rate-limit
+		// counter, so dropped events don't consume budget a reportable one needs.
+		// mMinLevel must stay below ERROR - see "Reporting threshold" in the README.
 		if (!event.getLevel().isMoreSpecificThan(mMinLevel)) {
 			return;
 		}

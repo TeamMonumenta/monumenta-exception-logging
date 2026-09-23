@@ -28,15 +28,13 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             canonical_frames   TEXT NOT NULL,
             canonical_trace    TEXT NOT NULL,
             logger             TEXT NOT NULL,
-            -- Log-event context, captured from the first occurrence only, in the
-            -- same way as logger/canonical_trace. Not part of the fingerprint.
+            -- Log-event context, captured once per group, then left alone. An
+            -- empty `level` marks a group stored before these columns existed;
+            -- ingest backfills all three on its next occurrence. (An empty
+            -- log_message_template, or a '[]' cause_chain, is an ordinary value
+            -- on a filled group.) Not part of the fingerprint. See SCHEMA.md.
             level              TEXT NOT NULL DEFAULT '',
-            -- The accompanying log message (logger.error("...", e)), normalized.
-            -- Distinct from message_template, which is the exception's own message.
             log_message_template TEXT NOT NULL DEFAULT '',
-            -- JSON array of the chained causes, outermost first, as
-            -- [{class_name, message, frames: [...]}]. Captured up to the depth the
-            -- plugin sends (5). Empty array when the exception had no cause.
             cause_chain        TEXT NOT NULL DEFAULT '[]',
             first_seen         INTEGER NOT NULL,
             last_seen          INTEGER NOT NULL,
@@ -64,10 +62,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             server     TEXT NOT NULL,
             timestamp  INTEGER NOT NULL,
             message    TEXT NOT NULL,
-            -- Raw accompanying log message for this occurrence. Kept per-occurrence
-            -- rather than only on the group because it carries per-event context the
-            -- exception message does not, e.g. Paper's "Task #9498967 for Monumenta
-            -- v11.84.2 generated an exception".
+            -- Per-occurrence, not just per-group: this is where per-event context
+            -- lives, e.g. the task id in Paper's "Task #N ... generated an exception".
             log_message TEXT NOT NULL DEFAULT ''
         );
 
@@ -145,10 +141,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-# Columns added after the initial schema. Each is also present in _create_tables,
-# so this list only matters for databases created before the column existed.
-# Every entry must carry a DEFAULT: existing rows cannot be backfilled, since the
-# data was discarded at ingest time before the column existed.
+# Columns added after the initial schema. Each is also declared in _create_tables,
+# so this list only matters for a database created before the column existed.
+# Every entry must carry a DEFAULT, since existing rows are not rewritten here.
 _ADDED_COLUMNS = (
     ("error_groups", "has_activity INTEGER NOT NULL DEFAULT 0"),
     ("error_groups", "level TEXT NOT NULL DEFAULT ''"),
@@ -161,8 +156,8 @@ _ADDED_COLUMNS = (
 def _migrate(conn: sqlite3.Connection) -> None:
     """Apply incremental schema changes to existing databases.
 
-    Table and column names here are module constants, never request input, so the
-    f-string interpolation is safe (ALTER TABLE cannot take bound parameters).
+    ALTER TABLE cannot take bound parameters, so the names are interpolated; they
+    come from _ADDED_COLUMNS, never from request input.
     """
     tables = {table for table, _ in _ADDED_COLUMNS}
     existing = {
@@ -176,9 +171,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
             conn.commit()
         except sqlite3.OperationalError as e:
-            # Another process opening the same database can win the race between the
-            # PRAGMA above and this ALTER. That one case is benign; anything else
-            # (a locked database, say) must not be swallowed the way it used to be.
+            # Another process opening the same database can add the column between
+            # the PRAGMA above and this ALTER. Only that race is benign - anything
+            # else (a locked database, say) must surface.
             if 'duplicate column name' not in str(e):
                 raise
 

@@ -32,16 +32,12 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 
 		verbose = rawVerbose != null && !rawVerbose.isBlank() && !rawVerbose.equalsIgnoreCase("false");
 
-		// Defaults to INFO, which is what the appender has effectively been doing since
-		// its level filter was dropped - see "Reporting threshold" in the README. This
-		// makes that explicit without changing what is captured; narrowing to WARN is a
-		// separate decision, and one worth taking only once the newly persisted `level`
-		// column shows how much INFO-with-throwable traffic actually exists.
+		// INFO rather than ERROR on purpose: most of what this tracker reports is
+		// logged at WARN. See "Reporting threshold" in the README before changing it.
 		//
 		// Level.toLevel falls back to the default for an unrecognized name, so a typo
-		// degrades to INFO rather than flooding or silencing the reporter. OFF is
-		// recognized by log4j but would silently disable reporting entirely, so it is
-		// rejected here rather than honoured.
+		// degrades to INFO rather than flooding or silencing the reporter. OFF would
+		// be recognized, but silently disables reporting, so it is rejected below.
 		Level minLevel = Level.toLevel(rawMinLevel == null ? "" : rawMinLevel.trim(), Level.INFO);
 		if (minLevel.equals(Level.OFF)) {
 			getLogger().warning("EXCEPTLOG_MIN_LEVEL=OFF would disable all reporting; using INFO. "

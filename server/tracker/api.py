@@ -35,11 +35,7 @@ class FrameSummary:
 
 @dataclass
 class CauseSummary:
-    """One link in an exception's chained-cause list.
-
-    Populated from the `cause` field the plugin already sends (PROTOCOL.md) and
-    captured from the group's first occurrence, alongside canonical_trace.
-    """
+    """One link in an exception's chained-cause list, outermost first."""
     class_name: str
     message: str
     frames: list[FrameSummary]
@@ -83,7 +79,7 @@ class OccurrenceSummary:
     timestamp: datetime
     server: str
     message: str
-    log_message: str = ''  # raw accompanying log message for this occurrence
+    log_message: str = ''  # raw log message accompanying the throwable
 
 
 @dataclass
@@ -101,9 +97,10 @@ class GroupDetails:
     servers_affected: list[str]           # servers seen within the retention window
     server_counts_24h: dict[str, int]     # fixed 24-hour window
     hourly_timeline: list[tuple[datetime, int]]  # (hour_start, count), fixed 7-day window
-    level: str = ''                       # log level, from the first occurrence
-    log_message_template: str = ''        # normalized accompanying log message, first occurrence
-    # Chained causes from the first occurrence only, outermost first.
+    # Log-event context, captured once per group. An empty `level` means the
+    # group has not been seen since these columns were added. See SCHEMA.md.
+    level: str = ''
+    log_message_template: str = ''        # normalized; NOT the exception's own message
     cause_chain: list[CauseSummary] = field(default_factory=list[CauseSummary])
     latest_message: Optional[str] = None  # most recent raw (un-normalized) exception message
     latest_log_message: Optional[str] = None  # most recent raw accompanying log message
@@ -119,7 +116,7 @@ def _ts_to_dt(ts: int) -> datetime:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
-def _frames_from_json(json_str: str) -> list[FrameSummary]:
+def _frames_from_dicts(items: list[dict[str, Any]]) -> list[FrameSummary]:
     return [
         FrameSummary(
             class_name=f['class_name'],
@@ -127,8 +124,12 @@ def _frames_from_json(json_str: str) -> list[FrameSummary]:
             file=f.get('file'),
             line=f.get('line', -1),
         )
-        for f in json.loads(json_str)
+        for f in items
     ]
+
+
+def _frames_from_json(json_str: str) -> list[FrameSummary]:
+    return _frames_from_dicts(json.loads(json_str))
 
 
 def _causes_from_json(json_str: str) -> list[CauseSummary]:
@@ -136,15 +137,7 @@ def _causes_from_json(json_str: str) -> list[CauseSummary]:
         CauseSummary(
             class_name=c['class_name'],
             message=c.get('message', ''),
-            frames=[
-                FrameSummary(
-                    class_name=f['class_name'],
-                    method=f['method'],
-                    file=f.get('file'),
-                    line=f.get('line', -1),
-                )
-                for f in c.get('frames', [])
-            ],
+            frames=_frames_from_dicts(c.get('frames', [])),
         )
         for c in json.loads(json_str or '[]')
     ]

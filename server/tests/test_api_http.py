@@ -1007,7 +1007,7 @@ def test_details_to_json_log_context_defaults():
 
 
 def test_details_to_json_cause_chain():
-    from tracker.api import CauseSummary  # pylint: disable=import-outside-toplevel
+    from tracker.api import CauseSummary
     inner = FrameSummary(class_name="com.example.Deep", method="run", file="Deep.java", line=7)
     d = _make_details(
         level='WARN',

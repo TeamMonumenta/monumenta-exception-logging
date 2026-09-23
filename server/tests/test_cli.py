@@ -575,8 +575,8 @@ def test_mutate_sends_the_token_as_a_bearer_header_and_quotes_the_path(monkeypat
 # ---------------------------------------------------------------------------
 # Log-event context rendering
 #
-# _details_stub deliberately omits the newer keys, so these also pin that
-# fmt_details stays tolerant of a server older than the CLI.
+# _details_stub omits these keys, so these also pin that fmt_details stays
+# tolerant of a server older than the CLI.
 # ---------------------------------------------------------------------------
 
 def test_fmt_details_without_log_context():

@@ -17,7 +17,7 @@ CREATE TABLE error_groups (
     canonical_frames   TEXT NOT NULL,              -- JSON array of top app frames used for fingerprinting
     canonical_trace    TEXT NOT NULL,              -- JSON full stack trace from the first-ever occurrence
     logger             TEXT NOT NULL,              -- logger name from first occurrence
-    level              TEXT NOT NULL DEFAULT '',   -- log level from first occurrence, e.g. "WARN"
+    level              TEXT NOT NULL DEFAULT '',   -- log level, e.g. "WARN"; '' until first captured
     log_message_template TEXT NOT NULL DEFAULT '', -- normalized accompanying log message (NOT the exception's)
     cause_chain        TEXT NOT NULL DEFAULT '[]', -- JSON array of chained causes, outermost first (<= 4)
     first_seen         INTEGER NOT NULL,
@@ -261,15 +261,31 @@ The fingerprint is computed by the Python ingest service from the raw event. It 
 3. `top_app_frames`: the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
 
 **Log-event context is stored but never fingerprinted.** `level`, `log_message_template` and
-`cause_chain` are captured on the group's first occurrence, the same way `logger` and
-`canonical_trace` are, and are excluded from the hash deliberately: the accompanying log message
-varies per event (Paper's scheduler puts the task id in it), and folding either it or the cause
-into the fingerprint would split one bug across many groups. They exist so that questions about
-*how* an exception was reported are answerable from the database.
+`cause_chain` are excluded from the hash deliberately: the accompanying log message varies per
+event (Paper's scheduler puts the task id in it) and the cause varies independently of the call
+site, so folding either into the fingerprint would split one bug across many groups. They exist
+so that questions about *how* an exception was reported are answerable from the database.
 
-Like `logger` and `canonical_trace`, they are captured on insert and never updated, so after a
-re-fingerprint merge they describe whichever group won rather than the earliest occurrence.
-Nothing here is fingerprinted, so this cannot split or mis-group anything.
+They are captured once per group and then left alone, like `logger` and `canonical_trace`, so
+after a re-fingerprint merge they describe whichever group won rather than the earliest
+occurrence. Nothing here is fingerprinted, so that cannot split or mis-group anything.
+
+"Once per group" is not the same as "on the group's first occurrence". A group that predates
+these columns has `level = ''`, and ingest fills all three from the next occurrence it sees.
+Without that, the groups whose cause chains are worth reading - the long-lived ones, which are
+never re-inserted because a group row is written once and only updated afterwards - would stay
+empty permanently.
+
+`level` is the sentinel because it is the one of the three a real producer always fills: log4j
+events always carry a level and heap-logger hardcodes `ERROR`, whereas an empty
+`log_message_template` (an event logged with no message) and a `'[]'` `cause_chain` (an
+exception with no cause) are ordinary values on a fully populated group. `/ingest` is
+unauthenticated and does not constrain `level`, so a crafted payload can still store an empty
+one; ingest therefore backfills only from an event that carries a level, which keeps the fill
+one-off rather than repeating on every occurrence of such a group.
+
+Nothing backfills from history: the data was discarded at ingest time, so it can only arrive on
+a new occurrence.
 
 **Hash:**
 ```python

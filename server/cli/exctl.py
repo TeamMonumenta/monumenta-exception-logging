@@ -198,8 +198,8 @@ def fmt_list_footer(shown: int, total: int, offset: Any = 0) -> str:
 
 def fmt_occurrence_line(o: dict[str, Any]) -> str:
     line = f"{fmt_timestamp(o['timestamp'])}  {o['server']}  {o['message']}"
-    # Shown only when it adds something: for a wrapper like ServerSchedulerException
-    # the log message and the exception message are the same string.
+    # Only when it adds something: a wrapper like ServerSchedulerException repeats
+    # its exception message verbatim as the log message.
     log_message = o.get('log_message')
     if log_message and log_message != o['message']:
         line += f"  [{log_message}]"
