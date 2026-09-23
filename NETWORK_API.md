@@ -61,7 +61,7 @@ tokens are swept during the hourly expiry pass.
 |---|---|---|---|
 | `GET` | `/api/health` | - | `{"ok": true}` |
 | `GET` | `/api/groups` | `status, server, search, new_within_hours, window_hours=24, sort, limit=50 (<=500), offset=0` | `{groups: [...], total: N}`. |
-| `GET` | `/api/groups/<id>` | - | Full group details JSON; `404` if unknown. Includes `level`, `log_message_template` and `cause_chain` (captured once per group; empty on a group not seen since these columns were added), plus `latest_log_message`. `cause_chain` is an array of `{class_name, message, frames}`, outermost cause first, empty when the exception had none. |
+| `GET` | `/api/groups/<id>` | - | Full group details JSON; `404` if unknown. Includes `level`, `thread`, `log_message_template` and `cause_chain`, all describing the group's most recent occurrence, plus `latest_log_message`. `cause_chain` is an array of `{class_name, message, frames}`, outermost cause first, empty when the exception had none. Every frame object carries `class_name`, `method`, `file`, `line` and `location` (the source jar, or null). |
 | `GET` | `/api/groups/<id>/occurrences` | `limit=20` (<=500) | `{occurrences: [...]}`. Raw, un-normalized messages, newest first. Each carries `log_message`, the raw accompanying log message, which is often where per-event context lives (Paper's scheduler puts the task id there). |
 | `GET` | `/api/groups/<id>/fix-attempts` | `limit=20` (<=500) | `{fix_attempts: [...]}`, newest first. |
 | `GET` | `/api/fix-attempts/<job_id>` | - | Single fix attempt's status; `404` if unknown. |

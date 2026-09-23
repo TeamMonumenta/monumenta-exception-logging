@@ -66,6 +66,7 @@ def _frame_to_json(frame: FrameSummary) -> dict[str, Any]:
         'method': frame.method,
         'file': frame.file,
         'line': frame.line,
+        'location': frame.location,
     }
 
 
@@ -102,6 +103,7 @@ def _details_to_json(d: GroupDetails) -> dict[str, Any]:
         'total_count': d.total_count,
         'logger': d.logger,
         'level': d.level,
+        'thread': d.thread,
         'log_message_template': d.log_message_template,
         'cause_chain': [_cause_to_json(c) for c in d.cause_chain],
         'canonical_frames': [_frame_to_json(f) for f in d.canonical_frames],

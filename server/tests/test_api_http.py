@@ -132,10 +132,12 @@ def test_details_to_json_frame_shape():
     d = _make_details()
     data = _details_to_json(d)
     assert data['canonical_frames'] == [
-        {'class_name': 'com.example.Foo', 'method': 'bar', 'file': 'Foo.java', 'line': 1}
+        {'class_name': 'com.example.Foo', 'method': 'bar', 'file': 'Foo.java',
+         'line': 1, 'location': None}
     ]
     assert data['canonical_trace'][1] == {
-        'class_name': 'com.example.Baz', 'method': 'qux', 'file': None, 'line': -1
+        'class_name': 'com.example.Baz', 'method': 'qux', 'file': None,
+        'line': -1, 'location': None
     }
 
 
@@ -1028,7 +1030,7 @@ def test_details_to_json_cause_chain():
             'class_name': 'java.lang.IllegalArgumentException',
             'message': 'World unloaded',
             'frames': [{'class_name': 'com.example.Deep', 'method': 'run',
-                        'file': 'Deep.java', 'line': 7}],
+                        'file': 'Deep.java', 'line': 7, 'location': None}],
         },
         {'class_name': 'java.lang.NullPointerException', 'message': '', 'frames': []},
     ]

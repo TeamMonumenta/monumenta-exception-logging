@@ -25,17 +25,21 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             fingerprint        TEXT NOT NULL UNIQUE,
             exception_class    TEXT NOT NULL,
             message_template   TEXT NOT NULL,
-            canonical_frames   TEXT NOT NULL,
-            canonical_trace    TEXT NOT NULL,
+            canonical_frames   TEXT NOT NULL,   -- hashed app frames, most recent occurrence
+            canonical_trace    TEXT NOT NULL,   -- full trace, most recent occurrence
+            -- Descriptive columns below refresh on every occurrence, so they
+            -- describe the most recent one. None is a fingerprint input, so
+            -- rewriting them cannot split or merge a group. See SCHEMA.md.
             logger             TEXT NOT NULL,
-            -- Log-event context, captured once per group, then left alone. An
-            -- empty `level` marks a group stored before these columns existed;
-            -- ingest backfills all three on its next occurrence. (An empty
-            -- log_message_template, or a '[]' cause_chain, is an ordinary value
-            -- on a filled group.) Not part of the fingerprint. See SCHEMA.md.
             level              TEXT NOT NULL DEFAULT '',
+            thread             TEXT NOT NULL DEFAULT '',
             log_message_template TEXT NOT NULL DEFAULT '',
             cause_chain        TEXT NOT NULL DEFAULT '[]',
+            -- The exact inputs that produced `fingerprint`, as JSON. Invariant
+            -- across a group by construction, so written once on insert. Lets a
+            -- regroup recompute from what was hashed rather than re-normalizing
+            -- an already-normalized message_template.
+            signature          TEXT NOT NULL DEFAULT '',
             first_seen         INTEGER NOT NULL,
             last_seen          INTEGER NOT NULL,
             total_count        INTEGER NOT NULL DEFAULT 0,
@@ -64,7 +68,13 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             message    TEXT NOT NULL,
             -- Per-occurrence, not just per-group: this is where per-event context
             -- lives, e.g. the task id in Paper's "Task #N ... generated an exception".
-            log_message TEXT NOT NULL DEFAULT ''
+            log_message TEXT NOT NULL DEFAULT '',
+            -- zlib-compressed original ingest payload. NULL past RAW_EVENT_CAP
+            -- occurrences for the same group and hour. This is what makes a future
+            -- regrouping a rebuild rather than a wipe: it is the only per-occurrence
+            -- record of the fingerprint inputs, and therefore the only way to split
+            -- a group. See SCHEMA.md.
+            raw_event   BLOB
         );
 
         CREATE INDEX IF NOT EXISTS idx_occurrences_group_timestamp
@@ -147,9 +157,12 @@ def _create_tables(conn: sqlite3.Connection) -> None:
 _ADDED_COLUMNS = (
     ("error_groups", "has_activity INTEGER NOT NULL DEFAULT 0"),
     ("error_groups", "level TEXT NOT NULL DEFAULT ''"),
+    ("error_groups", "thread TEXT NOT NULL DEFAULT ''"),
     ("error_groups", "log_message_template TEXT NOT NULL DEFAULT ''"),
     ("error_groups", "cause_chain TEXT NOT NULL DEFAULT '[]'"),
+    ("error_groups", "signature TEXT NOT NULL DEFAULT ''"),
     ("occurrences", "log_message TEXT NOT NULL DEFAULT ''"),
+    ("occurrences", "raw_event BLOB"),
 )
 
 
@@ -294,10 +307,11 @@ def migrate_fingerprints(
     from .fingerprint import (  # pylint: disable=import-outside-toplevel
         compute_fingerprint, normalize_message, extract_app_frames,
     )
+    from .ingest import build_signature  # pylint: disable=import-outside-toplevel
 
     rows = conn.execute(
         "SELECT id, fingerprint, exception_class, message_template, "
-        "canonical_frames, discord_message_id, total_count, first_seen, last_seen "
+        "canonical_trace, discord_message_id, total_count, first_seen, last_seen "
         "FROM error_groups"
     ).fetchall()
 
@@ -307,10 +321,28 @@ def migrate_fingerprints(
 
     with conn:
         for row in rows:
-            frames = json.loads(row['canonical_frames'])
-            new_normalized = normalize_message(row['message_template'])
+            # Re-derive from what ingest itself consumes: the full trace, and the
+            # raw message from an occurrence. Recomputing from canonical_frames
+            # would feed already-filtered frames back through extract_app_frames,
+            # whose no-app-frame fallback then returns the wrong frames silently
+            # rather than failing. Recomputing from message_template would
+            # re-normalize an already-normalized value, which is not a no-op:
+            # nested bracket data loses one nesting level per pass.
+            frames = json.loads(row['canonical_trace'])
+            raw_row = conn.execute(
+                "SELECT message FROM occurrences WHERE group_id = ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (row['id'],)
+            ).fetchone()
+            # A group whose occurrences have all aged out has no raw message left;
+            # its stored template is the best available input.
+            raw_message = raw_row['message'] if raw_row is not None else row['message_template']
+
+            new_normalized = normalize_message(raw_message)
             top_frames = extract_app_frames(frames, app_packages, 3)
             new_fp = compute_fingerprint(row['exception_class'], new_normalized, top_frames)
+            new_signature = build_signature(
+                row['exception_class'], new_normalized, top_frames)
 
             if new_fp == row['fingerprint']:
                 continue
@@ -323,9 +355,9 @@ def migrate_fingerprints(
 
             if winner is None:
                 conn.execute(
-                    "UPDATE error_groups SET fingerprint = ?, message_template = ?, has_activity = 1 "
-                    "WHERE id = ?",
-                    (new_fp, new_normalized, row['id'])
+                    "UPDATE error_groups SET fingerprint = ?, message_template = ?, "
+                    "signature = ?, has_activity = 1 WHERE id = ?",
+                    (new_fp, new_normalized, new_signature, row['id'])
                 )
                 conn.execute(
                     "UPDATE fix_attempts SET fingerprint = ? WHERE fingerprint = ?",

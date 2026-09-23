@@ -43,12 +43,12 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 
 | Field | Type | Description |
 |---|---|---|
-| `schema_version` | integer | Always `1` for this version. Used by the server to handle future format changes. |
+| `schema_version` | integer | Always `1` for this version. Used by the server to handle future format changes. Not stored as a column; it survives inside `occurrences.raw_event`. |
 | `server_id` | string | Identifies the originating server. Read from `EXCEPTLOG_SERVER_NAME` env var at plugin startup. Falls back to hostname if env var is absent. |
 | `timestamp_ms` | integer | Unix timestamp in milliseconds (UTC) when the log event was emitted. From `LogEvent.getTimeMillis()`. |
 | `level` | string | Log level string of the originating event, e.g. `"WARN"` or `"ERROR"`. The plugin reports everything at or above `EXCEPTLOG_MIN_LEVEL` (default `INFO`) - see "Reporting threshold" in the README. Stored as `error_groups.level`. |
 | `logger` | string | The Log4j2 logger name that emitted the event. Typically the fully-qualified plugin class name, e.g. `com.playmonumenta.plugins.Plugin`. |
-| `thread` | string | Name of the thread that logged the event, e.g. `"Server thread"`. From `LogEvent.getThreadName()`. |
+| `thread` | string | Name of the thread that logged the event, e.g. `"Server thread"`. From `LogEvent.getThreadName()`. Stored as `error_groups.thread`, refreshed per occurrence - it distinguishes a main-thread failure from an async one. |
 | `message` | string | The human-readable log message that accompanied the exception, e.g. `"Failed to load boss!"`. This is the message passed to `logger.error(...)`, not the exception message. May be empty string if no message was provided. Often carries context the exception's own message does not - Paper's scheduler puts the task id and owning plugin here. Stored normalized as `error_groups.log_message_template` and raw as `occurrences.log_message`. Not fingerprinted. |
 | `exception` | object | The captured exception. Always present (events without a throwable are filtered by the plugin before sending). |
 
@@ -59,7 +59,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | `class_name` | string | Fully-qualified exception class name, e.g. `"java.lang.NullPointerException"` or `"com.playmonumenta.plugins.SomeCustomException"`. |
 | `message` | string \| null | The exception's own message (`e.getMessage()`). Null if no message was set. May contain variable content (player names, coordinates, etc.) - the server normalizes this for fingerprinting. |
 | `frames` | array | Ordered list of stack frames, from closest to throw site (index 0) to oldest caller. See Frame Object below. Includes all frames; the server filters for application frames during fingerprinting. |
-| `cause` | object \| null | The chained cause exception, if any (`e.getCause()`). Same structure as `exception`. Cause chains are captured up to a depth of 5 to prevent unbounded nesting; that budget includes the outermost throwable, so a well-behaved payload carries at most 4 causes. Stored as `error_groups.cause_chain` and served on `GET /api/groups/<id>`. `/ingest` is unauthenticated, so the server enforces its own caps (`MAX_CAUSE_DEPTH`, `MAX_CAUSE_FRAMES` in `tracker/ingest.py`) rather than trusting this one. Not fingerprinted. |
+| `cause` | object \| null | The chained cause exception, if any (`e.getCause()`). Same structure as `exception`. Cause chains are captured up to a depth of 5 to prevent unbounded nesting; that budget includes the outermost throwable, so a well-behaved payload carries at most 4 causes. Stored as `error_groups.cause_chain` (refreshed per occurrence, so it reflects the newest one) and served on `GET /api/groups/<id>`. `/ingest` is unauthenticated, so the server enforces its own caps (`MAX_CAUSE_DEPTH`, `MAX_CAUSE_FRAMES` in `tracker/ingest.py`) rather than trusting this one. Not fingerprinted. |
 
 ### Frame Object
 
@@ -69,7 +69,7 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 | `method` | string | Method name, e.g. `"<init>"`, `"processEntity"`. |
 | `file` | string \| null | Source file name, e.g. `"GenericTargetBoss.java"`. Null when compiled without debug info. |
 | `line` | integer | Source line number. `-1` if unknown (e.g. native methods, or compiled without debug info). |
-| `location` | string \| null | JAR file or module the class was loaded from, e.g. `"Monumenta.jar"`, `"paper-1.20.4.jar"`. Derived from `StackTraceElement.toString()` - the portion in brackets. Null when not available (`"?"` in raw output is normalized to null). |
+| `location` | string \| null | JAR file or module the class was loaded from, e.g. `"Monumenta.jar"`, `"paper-1.20.4.jar"`. Derived from `StackTraceElement.toString()` - the portion in brackets. Null when not available (`"?"` in raw output is normalized to null). Stored on every frame; it is what separates our own code from a third-party plugin's in an otherwise identical-looking trace. |
 
 ## Plugin Implementation Notes
 

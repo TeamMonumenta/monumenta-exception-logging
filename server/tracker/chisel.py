@@ -40,6 +40,16 @@ def render_fix_prompt(template: str, details: GroupDetails) -> str:
     Unknown variables (not in the substitution map) are left as-is.
     """
     stacktrace = "\n".join(fmt_frame(f) for f in details.canonical_trace)
+    # Without this, a wrapped exception hands Chisel only the wrapper's frames -
+    # the tick loop or scheduler machinery - and asks it to fix a bug that appears
+    # nowhere in what it was given.
+    cause_chain = "\n".join(
+        "\n".join([
+            f"Caused by: {c.class_name}" + (f": {c.message}" if c.message else ""),
+            *(fmt_frame(f) for f in c.frames),
+        ])
+        for c in details.cause_chain
+    ) or "(none)"
     servers = ", ".join(sorted(details.servers_affected)) if details.servers_affected else "none"
     subs: dict[str, str] = {
         "short_id": details.fingerprint[:8],
@@ -47,6 +57,7 @@ def render_fix_prompt(template: str, details: GroupDetails) -> str:
         "message": details.message_template,
         "raw_message": details.latest_message if details.latest_message is not None else details.message_template,
         "stacktrace": stacktrace,
+        "cause_chain": cause_chain,
         "count": str(details.total_count),
         "servers": servers,
         "first_seen": details.first_seen.isoformat(),

@@ -8,16 +8,18 @@ fingerprinting, normalization, and grouping work correctly end-to-end.
 """
 
 import copy
+import json
 import sys
 import os
 import sqlite3
+import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from tracker.config import TrackerConfig
 from tracker.api import Tracker
-from tracker.ingest import parse_event
+from tracker.ingest import RAW_EVENT_CAP, parse_event
 from tests.fixtures import (
     EXAMPLE_EVENT,
     REAL_NPE_ALLAY,
@@ -314,14 +316,6 @@ _WRAPPED_EVENT = {
 _RAW_LOG_MESSAGE = 'Task #9498967 for Monumenta v11.84.2 generated an exception'
 
 
-def _blank_log_context(api: Tracker) -> None:
-    """Make every group look like one written before the log-context columns existed."""
-    conn = api._conn  # pylint: disable=protected-access
-    conn.execute("UPDATE error_groups SET level = '', log_message_template = '', "
-                 "cause_chain = '[]'")
-    conn.commit()
-
-
 def test_level_and_log_message_are_persisted(fresh_api):
     fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
     details = fresh_api.get_group_details(fp)
@@ -370,91 +364,107 @@ def test_log_context_does_not_affect_the_fingerprint(fresh_api):
     assert new_a is True and new_b is False
 
 
-def test_group_context_is_not_rewritten_by_later_occurrences(fresh_api):
-    """Captured once per group, like logger and canonical_trace."""
-    later = copy.deepcopy(_WRAPPED_EVENT)
-    later['level'] = 'ERROR'
-    later['exception']['cause'] = None
-    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    fresh_api.ingest_event(parse_event(later))
-    details = fresh_api.get_group_details(fp)
-    assert details.level == 'WARN'
-    assert len(details.cause_chain) == 2
+def test_descriptive_columns_track_the_newest_occurrence(fresh_api):
+    """level/thread/log message/cause describe the newest occurrence, not the first.
 
-
-# ---------------------------------------------------------------------------
-# Backfill onto groups that predate these columns
-# ---------------------------------------------------------------------------
-
-def test_existing_group_without_context_is_backfilled_on_its_next_occurrence(fresh_api):
-    """A group row is written once and only updated afterwards, so a group that
-    predates these columns acquires its context from its next occurrence."""
-    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    _blank_log_context(fresh_api)
-    assert fresh_api.get_group_details(fp).cause_chain == []
-
-    _, is_new = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    assert is_new is False
-    details = fresh_api.get_group_details(fp)
-    assert details.level == 'WARN'
-    assert details.log_message_template.startswith('Task #<N> for Monumenta')
-    assert [c.class_name for c in details.cause_chain] == [
-        'java.lang.IllegalArgumentException', 'java.lang.NullPointerException',
-    ]
-
-
-def test_backfill_is_a_one_time_fill_not_a_running_update(fresh_api):
-    """Once filled, the group is stable again - the next occurrence must not win."""
-    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    _blank_log_context(fresh_api)
-    fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-
-    later = copy.deepcopy(_WRAPPED_EVENT)
-    later['level'] = 'ERROR'
-    later['exception']['cause'] = None
-    fresh_api.ingest_event(parse_event(later))
-
-    details = fresh_api.get_group_details(fp)
-    assert details.level == 'WARN'
-    assert len(details.cause_chain) == 2
-
-
-def test_backfill_does_not_disturb_an_unrelated_group(fresh_api):
-    """Only the group the event belongs to is touched."""
-    other_fp, _ = fresh_api.ingest_event(parse_event(REAL_NPE_ALLAY))
-    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    _blank_log_context(fresh_api)
-
-    fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    assert fresh_api.get_group_details(fp).level == 'WARN'
-    # The NPE group was blanked too and has had no further occurrence, so it stays
-    # empty rather than picking up context from an event that is not its own.
-    # Both events share a level and normalize to the same log message, so the
-    # cause chain is the only field that would expose a missing WHERE clause.
-    other = fresh_api.get_group_details(other_fp)
-    assert other.level == ''
-    assert other.cause_chain == []
-
-
-def test_backfill_is_skipped_for_an_event_carrying_no_level(fresh_api):
-    """/ingest does not constrain `level`, and an empty one is the sentinel.
-
-    Backfilling from such an event would store an empty level again, leaving the
-    group flagged and re-running the fill on every later occurrence.
+    A group first seen months ago otherwise reports stale context forever - and a
+    stuck bug captured early would mask every later variant behind it.
     """
-    levelless = copy.deepcopy(_WRAPPED_EVENT)
-    levelless['level'] = ''
-    fp, _ = fresh_api.ingest_event(parse_event(levelless))
-    _blank_log_context(fresh_api)
+    later = copy.deepcopy(_WRAPPED_EVENT)
+    later['level'] = 'ERROR'
+    later['thread'] = 'Craft Scheduler Thread - 3'
+    later['exception']['cause'] = None
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    fresh_api.ingest_event(parse_event(later))
 
-    fresh_api.ingest_event(parse_event(levelless))
     details = fresh_api.get_group_details(fp)
-    assert details.level == ''
+    assert details.level == 'ERROR'
+    assert details.thread == 'Craft Scheduler Thread - 3'
     assert details.cause_chain == []
 
-    # A later event that does carry a level fills it, exactly once.
+
+def test_canonical_trace_tracks_the_newest_occurrence(fresh_api):
+    """Chisel is handed current line numbers, not the first sighting's."""
+    moved = copy.deepcopy(_WRAPPED_EVENT)
+    moved['exception']['frames'][0]['line'] = 999
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    assert fresh_api.get_group_details(fp).canonical_trace[0].line == 497
+    fresh_api.ingest_event(parse_event(moved))
+    assert fresh_api.get_group_details(fp).canonical_trace[0].line == 999
+
+
+def test_fingerprint_inputs_are_not_rewritten(fresh_api):
+    """signature and message_template are hashed inputs, so they must stay put.
+
+    They are identical across a group by construction; rewriting them would let a
+    group drift away from the fingerprint that defines it.
+    """
     fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
-    assert fresh_api.get_group_details(fp).level == 'WARN'
+    before = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT signature, message_template FROM error_groups').fetchone()
+    fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    after = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT signature, message_template FROM error_groups').fetchone()
+    assert before['signature'] == after['signature']
+    assert before['message_template'] == after['message_template']
+    # And it records what was actually hashed.
+    sig = json.loads(before['signature'])
+    assert sig['exception_class'] == _WRAPPED_EVENT['exception']['class_name']
+    assert sig['message_template'] == before['message_template']
+    assert sig['frames'] == [
+        'org.bukkit.craftbukkit.v1_20_R3.scheduler.CraftScheduler.mainThreadHeartbeat']
+
+
+def test_frames_keep_their_source_jar(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    details = fresh_api.get_group_details(fp)
+    assert details.canonical_trace[0].location is None
+    assert details.cause_chain[0].frames[0].location == 'Monumenta.jar'
+
+
+# ---------------------------------------------------------------------------
+# Raw event retention
+# ---------------------------------------------------------------------------
+
+def test_raw_event_round_trips_through_parse_event(fresh_api):
+    """The stored payload must reconstruct an equivalent event.
+
+    This is the whole point of the column: a future regrouping recomputes from it,
+    so anything it cannot reproduce is gone for good.
+    """
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    blob = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT raw_event FROM occurrences').fetchone()['raw_event']
+    restored = parse_event(json.loads(zlib.decompress(blob).decode('utf-8')))
+    original = parse_event(_WRAPPED_EVENT)
+    assert restored == original
+    # Including the cause chain and per-frame source jars.
+    assert restored.exception.cause is not None
+    assert restored.exception.cause.frames[0].location == 'Monumenta.jar'
+    assert fresh_api.get_group_details(fp).total_count == 1
+
+
+def test_raw_event_stops_at_the_cap(fresh_api):
+    """Past the cap the column is NULL, bounding a misbehaving shard's storage."""
+    for _ in range(RAW_EVENT_CAP + 5):
+        fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    rows = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT raw_event FROM occurrences ORDER BY id').fetchall()
+    assert len(rows) == RAW_EVENT_CAP + 5
+    assert all(r['raw_event'] is not None for r in rows[:RAW_EVENT_CAP])
+    assert all(r['raw_event'] is None for r in rows[RAW_EVENT_CAP:])
+
+
+def test_raw_event_cap_is_per_server_and_hour(fresh_api):
+    """A quiet shard still gets samples while a noisy one is capped."""
+    for _ in range(RAW_EVENT_CAP + 3):
+        fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    other = copy.deepcopy(_WRAPPED_EVENT)
+    other['server_id'] = 'valley-9'
+    fresh_api.ingest_event(parse_event(other))
+    row = fresh_api._conn.execute(  # pylint: disable=protected-access
+        "SELECT raw_event FROM occurrences WHERE server = 'valley-9'").fetchone()
+    assert row['raw_event'] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -626,3 +636,60 @@ def test_cause_chain_frames_are_capped(fresh_api):
     ]
     fp, _ = fresh_api.ingest_event(parse_event(wide))
     assert len(fresh_api.get_group_details(fp).cause_chain[0].frames) == MAX_CAUSE_FRAMES
+
+
+# ---------------------------------------------------------------------------
+# Re-fingerprinting inputs
+# ---------------------------------------------------------------------------
+
+def test_refingerprint_uses_the_full_trace_not_the_hashed_subset(fresh_api):
+    """Widening app_packages must find frames that were not in canonical_frames.
+
+    canonical_frames holds only the already-selected top-3. Feeding it back through
+    extract_app_frames cannot see any other frame, and because that function falls
+    back to frames[:count] when nothing matches, the result is silently wrong
+    rather than an error.
+    """
+    event = copy.deepcopy(_WRAPPED_EVENT)
+    event['exception']['frames'] = [
+        {'class_name': 'org.bukkit.craftbukkit.scheduler.CraftScheduler',
+         'method': 'mainThreadHeartbeat', 'file': 'CS.java', 'line': 1, 'location': None},
+        {'class_name': 'com.playmonumenta.plugins.A', 'method': 'a',
+         'file': 'A.java', 'line': 2, 'location': 'Monumenta.jar'},
+        {'class_name': 'com.example.deep.Target', 'method': 'boom',
+         'file': 'Target.java', 'line': 3, 'location': 'Other.jar'},
+    ]
+    fp, _ = fresh_api.ingest_event(parse_event(event))
+    # Only the Monumenta frame was hashed, so the com.example frame survives
+    # nowhere but canonical_trace.
+    assert [f.class_name for f in fresh_api.get_group_details(fp).canonical_frames] == [
+        'com.playmonumenta.plugins.A']
+
+    from tracker.db import migrate_fingerprints
+    migrate_fingerprints(fresh_api._conn, ['com.example.deep'])  # pylint: disable=protected-access
+
+    rows = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT signature FROM error_groups').fetchall()
+    assert len(rows) == 1
+    assert json.loads(rows[0]['signature'])['frames'] == ['com.example.deep.Target.boom']
+
+
+def test_refingerprint_normalizes_from_a_raw_message(fresh_api):
+    """Re-normalizing the stored template is not a no-op for nested bracket data.
+
+    Starting from an occurrence's raw message makes the result independent of how
+    many times the migration has run before.
+    """
+    event = copy.deepcopy(_WRAPPED_EVENT)
+    event['exception']['message'] = 'Entity at [x=1, y=2, z=[a, b]] failed'
+    fp, _ = fresh_api.ingest_event(parse_event(event))
+    template = fresh_api.get_group_details(fp).message_template
+
+    from tracker.db import migrate_fingerprints
+    for _ in range(3):
+        migrate_fingerprints(fresh_api._conn, ['com.playmonumenta'])  # pylint: disable=protected-access
+
+    rows = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT message_template FROM error_groups').fetchall()
+    assert len(rows) == 1
+    assert rows[0]['message_template'] == template

@@ -14,12 +14,14 @@ CREATE TABLE error_groups (
     fingerprint        TEXT NOT NULL UNIQUE,       -- SHA-256 hex of fingerprint components
     exception_class    TEXT NOT NULL,              -- e.g. "java.lang.NullPointerException"
     message_template   TEXT NOT NULL,              -- normalized exception message (variable content stripped)
-    canonical_frames   TEXT NOT NULL,              -- JSON array of top app frames used for fingerprinting
-    canonical_trace    TEXT NOT NULL,              -- JSON full stack trace from the first-ever occurrence
-    logger             TEXT NOT NULL,              -- logger name from first occurrence
-    level              TEXT NOT NULL DEFAULT '',   -- log level, e.g. "WARN"; '' until first captured
+    signature          TEXT NOT NULL DEFAULT '',  -- JSON of the exact inputs that produced `fingerprint`
+    canonical_frames   TEXT NOT NULL,              -- JSON array of the app frames that were hashed
+    canonical_trace    TEXT NOT NULL,              -- JSON full stack trace, most recent occurrence
+    logger             TEXT NOT NULL,              -- logger name, most recent occurrence
+    level              TEXT NOT NULL DEFAULT '',   -- log level, e.g. "WARN", most recent occurrence
+    thread             TEXT NOT NULL DEFAULT '',   -- thread name, most recent occurrence
     log_message_template TEXT NOT NULL DEFAULT '', -- normalized accompanying log message (NOT the exception's)
-    cause_chain        TEXT NOT NULL DEFAULT '[]', -- JSON array of chained causes, outermost first (<= 4)
+    cause_chain        TEXT NOT NULL DEFAULT '[]', -- JSON chained causes, outermost first, most recent occurrence
     first_seen         INTEGER NOT NULL,
     last_seen          INTEGER NOT NULL,
     total_count        INTEGER NOT NULL DEFAULT 0,
@@ -62,7 +64,8 @@ CREATE TABLE occurrences (
     server     TEXT NOT NULL,
     timestamp  INTEGER NOT NULL,
     message    TEXT NOT NULL,   -- raw (un-normalized) exception message from the event
-    log_message TEXT NOT NULL DEFAULT ''  -- raw accompanying log message from the event
+    log_message TEXT NOT NULL DEFAULT '',  -- raw accompanying log message from the event
+    raw_event   BLOB            -- zlib-compressed ingest payload; NULL past RAW_EVENT_CAP per group+server+hour
 );
 
 CREATE INDEX idx_occurrences_group_timestamp ON occurrences(group_id, timestamp);
@@ -260,32 +263,88 @@ The fingerprint is computed by the Python ingest service from the raw event. It 
    Rules are applied in order; each rule's output is the input to the next. Bare UUIDs are consumed before the long-token rule, so they always produce `<uuid>` rather than `<id>`. Versions are consumed before the number rule, so the abbreviated git hash isn't fragmented into `g<N>` noise.
 3. `top_app_frames`: the first (closest to throw site) 3 frames whose `class_name` matches any of the configured application package prefixes (default: `["com.playmonumenta"]`). Each frame is represented as `"fully.qualified.ClassName.methodName"` (no file/line, to be stable across minor code changes).
 
-**Log-event context is stored but never fingerprinted.** `level`, `log_message_template` and
-`cause_chain` are excluded from the hash deliberately: the accompanying log message varies per
-event (Paper's scheduler puts the task id in it) and the cause varies independently of the call
-site, so folding either into the fingerprint would split one bug across many groups. They exist
-so that questions about *how* an exception was reported are answerable from the database.
+### Which columns are identity and which are description
 
-They are captured once per group and then left alone, like `logger` and `canonical_trace`, so
-after a re-fingerprint merge they describe whichever group won rather than the earliest
-occurrence. Nothing here is fingerprinted, so that cannot split or mis-group anything.
+Two kinds of column live on `error_groups`, and the distinction governs when each is
+written.
 
-"Once per group" is not the same as "on the group's first occurrence". A group that predates
-these columns has `level = ''`, and ingest fills all three from the next occurrence it sees.
-Without that, the groups whose cause chains are worth reading - the long-lived ones, which are
-never re-inserted because a group row is written once and only updated afterwards - would stay
-empty permanently.
+**Identity — written once, on insert.** `fingerprint`, `exception_class`,
+`message_template` and `signature`. These are the fingerprint's inputs (or the hash
+itself), and they are identical across every occurrence in a group *by construction* -
+two events that normalize differently get different fingerprints and therefore different
+groups. Rewriting them would let a group drift away from the hash that defines it.
 
-`level` is the sentinel because it is the one of the three a real producer always fills: log4j
-events always carry a level and heap-logger hardcodes `ERROR`, whereas an empty
-`log_message_template` (an event logged with no message) and a `'[]'` `cause_chain` (an
-exception with no cause) are ordinary values on a fully populated group. `/ingest` is
-unauthenticated and does not constrain `level`, so a crafted payload can still store an empty
-one; ingest therefore backfills only from an event that carries a level, which keeps the fill
-one-off rather than repeating on every occurrence of such a group.
+**Description — rewritten on every occurrence.** `canonical_frames`, `canonical_trace`,
+`logger`, `level`, `thread`, `log_message_template` and `cause_chain`. None of these is
+hashed, so refreshing them can neither split nor merge a group; they simply describe the
+newest occurrence.
 
-Nothing backfills from history: the data was discarded at ingest time, so it can only arrive on
-a new occurrence.
+Refreshing rather than freezing matters for two reasons:
+
+- **Line numbers go stale.** A group first seen six months ago would otherwise hand
+  Chisel a six-month-old stack trace, with line numbers that no longer correspond to
+  anything in the file it is being asked to edit.
+- **A frozen sample masks everything behind it.** Where one fingerprint covers several
+  underlying faults - a wrapper whose trace has no application frames, so
+  `extract_app_frames` falls back to platform frames identical for every failure - the
+  first cause captured would be the only one ever shown, and a bug that stays unfixed is
+  exactly the one most likely to be captured first. Refreshing means the displayed cause
+  is whatever most recently happened.
+
+Because they refresh unconditionally, there is no "has this group been populated yet"
+state to detect and no backfill: a group written before these columns existed acquires
+them on its next occurrence like any other.
+
+### `signature` - what was actually hashed
+
+`signature` stores the fingerprint's inputs as JSON: `exception_class`, the normalized
+`message_template`, and the `Class.method` strings of the hashed frames.
+
+It exists so that regrouping can be audited and verified against what was really hashed,
+rather than inferred by re-deriving it. Re-deriving is subtly lossy in both directions:
+
+- Re-normalizing `message_template` is not idempotent. `_BRACKET_DATA_RE` matches
+  innermost brackets only, so each pass peels one nesting level
+  (`[x=1, y=2, z=[a, b]]` -> `[x=<N>, y=<N>, z=<data>]` -> `<data>`). It converges, but
+  the value drifts on the way.
+- Re-running `extract_app_frames` over `canonical_frames` cannot work, because those are
+  already the *selected* frames. Worse, that function falls back to `frames[:count]` when
+  nothing matches, so a widened application-package list yields plausible-looking wrong
+  frames rather than an error.
+
+`migrate_fingerprints` therefore re-derives from `canonical_trace` (the full frame list)
+and from an occurrence's raw `message`, and writes a fresh `signature` alongside the new
+fingerprint.
+
+### `raw_event` - why the payload is kept
+
+`occurrences.raw_event` holds the zlib-compressed ingest payload for each occurrence.
+
+Regrouping under a *changed* rule is only possible with per-occurrence inputs.
+`migrate_fingerprints` computes one new fingerprint per existing group, so it can rename
+a group or merge two, but it can never **split** one: splitting requires knowing which
+occurrences belong to which child, and no group-level column can answer that. `raw_event`
+is the only per-occurrence record of the fingerprint inputs, and so the only thing that
+makes a future rule change a rebuild rather than a database wipe.
+
+Two practical limits:
+
+- **It is the validated payload, not the literal bytes.** Fields the current
+  `IngestEvent` model does not define are dropped before storage. This preserves every
+  field the protocol defines today; it does not preserve fields a future plugin might
+  send to an older server.
+- **It is capped.** Past `RAW_EVENT_CAP` occurrences for the same group, server and hour,
+  the column is NULL. A group already has ample samples of itself within an hour, and the
+  cap is what stops a misbehaving shard turning a ~1 KB-per-occurrence column into
+  gigabytes. Expect roughly 1 KB per retained occurrence, and note that nothing
+  `VACUUM`s the database automatically.
+
+**Log-event context is never fingerprinted.** `level`, `thread`, `log_message_template`
+and `cause_chain` are excluded from the hash deliberately: the accompanying log message
+varies per event (Paper's scheduler puts the task id in it) and the cause varies
+independently of the call site, so folding either into the fingerprint would split one
+bug across many groups. They exist so that questions about *how* an exception was
+reported are answerable from the database.
 
 **Hash:**
 ```python

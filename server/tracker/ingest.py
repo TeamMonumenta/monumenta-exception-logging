@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Byron Marohn
 import json
 import sqlite3
+import zlib
 from collections.abc import Iterable
 from typing import Any, Optional
 
@@ -45,14 +46,15 @@ def parse_event(raw: dict[str, Any]) -> IngestEvent:
 
 
 def _frames_to_json_shape(frames: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Project frames onto the subset of fields stored in the database.
+    """Project frames onto the fields stored in the database.
 
-    `location` is dropped: it identifies the source jar, which is useful when
-    reading a trace live but not worth storing on every frame of every group.
+    `location` is the source jar, which distinguishes our code from a third-party
+    plugin's in an otherwise identical-looking trace.
     """
     return [
         {'class_name': f['class_name'], 'method': f['method'],
-         'file': f.get('file'), 'line': f.get('line', -1)}
+         'file': f.get('file'), 'line': f.get('line', -1),
+         'location': f.get('location')}
         for f in frames
     ]
 
@@ -77,12 +79,12 @@ def flatten_cause_chain(exc: ExceptionModel) -> list[dict[str, Any]]:
         chain.append({
             'class_name': cause.class_name,
             'message': cause.message or '',
-            # The same four keys _frames_to_json_shape produces, read straight off
-            # the model: routing through model_dump() to share that helper costs
-            # about 10x here, and this is the one path with a hostile-input cap.
+            # The same keys _frames_to_json_shape produces, read straight off the
+            # model: routing through model_dump() to share that helper costs about
+            # 10x here, and this is the one path with a hostile-input cap.
             'frames': [
                 {'class_name': f.class_name, 'method': f.method,
-                 'file': f.file, 'line': f.line}
+                 'file': f.file, 'line': f.line, 'location': f.location}
                 for f in cause.frames[:MAX_CAUSE_FRAMES]
             ],
         })
@@ -90,13 +92,39 @@ def flatten_cause_chain(exc: ExceptionModel) -> list[dict[str, Any]]:
     return chain
 
 
-def _log_context(event: IngestEvent) -> tuple[str, str, str]:
-    """The three group-level log-context columns, as stored.
+# Occurrences per (group, server, hour) that keep their raw payload. Past this the
+# column is NULL: a group already has RAW_EVENT_CAP samples of itself for that hour,
+# and the cap is what stops a misbehaving shard turning a ~1 KB/occurrence column
+# into gigabytes. See SCHEMA.md.
+RAW_EVENT_CAP = 50
 
-    Context, not identity: none of it is fingerprinted. See SCHEMA.md for why.
+
+def build_signature(
+    exception_class: str, normalized_message: str, top_frames: list[dict[str, Any]]
+) -> str:
+    """The exact inputs `compute_fingerprint` consumed, as JSON.
+
+    Stored so a regroup recomputes from what was hashed. Recomputing from
+    message_template instead re-normalizes an already-normalized value, which is
+    not a no-op: nested bracket data loses one nesting level per pass.
+    """
+    return json.dumps({
+        'exception_class': exception_class,
+        'message_template': normalized_message,
+        'frames': [f"{f['class_name']}.{f['method']}" for f in top_frames],
+    }, sort_keys=True)
+
+
+def _descriptive_columns(event: IngestEvent) -> tuple[str, str, str, str, str]:
+    """Columns describing how the exception was reported, for the newest occurrence.
+
+    None of this is a fingerprint input, so refreshing it on every occurrence can
+    neither split nor merge a group. See SCHEMA.md.
     """
     return (
+        event.logger,
         event.level,
+        event.thread,
         normalize_message(event.message),
         json.dumps(flatten_cause_chain(event.exception)),
     )
@@ -118,67 +146,64 @@ def ingest_event(
     canonical_trace_json = json.dumps(_frames_to_json_shape(frames))
 
     with conn:
-        # `level` is the sentinel for "no log context stored yet": it is the one
-        # of the three columns a real producer always fills (log4j events always
-        # carry a level; heap-logger hardcodes ERROR), whereas an empty
-        # log_message_template or a '[]' cause_chain are ordinary stored values.
         row = conn.execute(
-            "SELECT id, level = '' AS needs_context "
-            "FROM error_groups WHERE fingerprint = ?",
-            (fingerprint,)
+            'SELECT id FROM error_groups WHERE fingerprint = ?', (fingerprint,)
         ).fetchone()
 
         is_new = row is None
         if is_new:
             cur = conn.execute(
                 """INSERT INTO error_groups
-                   (fingerprint, exception_class, message_template, canonical_frames,
-                    canonical_trace, logger, level, log_message_template, cause_chain,
+                   (fingerprint, exception_class, message_template, signature,
+                    canonical_frames, canonical_trace, logger, level, thread,
+                    log_message_template, cause_chain,
                     first_seen, last_seen, total_count, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active')""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'active')""",
                 (fingerprint, event.exception.class_name, normalized_msg,
+                 build_signature(event.exception.class_name, normalized_msg, top_frames),
                  canonical_frames_json, canonical_trace_json,
-                 event.logger, *_log_context(event),
-                 timestamp_s, timestamp_s)
+                 *_descriptive_columns(event), timestamp_s, timestamp_s)
             )
             group_id = cur.lastrowid
         else:
             group_id = row['id']
+            # The descriptive columns are rewritten, not preserved, so the group
+            # describes its newest occurrence rather than one from months ago.
+            # `signature` and `message_template` are fingerprint inputs and are
+            # identical across the group by construction, so they are left alone.
             conn.execute(
                 """UPDATE error_groups
-                   SET last_seen = ?, total_count = total_count + 1, has_activity = 1
+                   SET last_seen = ?, total_count = total_count + 1, has_activity = 1,
+                       canonical_frames = ?, canonical_trace = ?,
+                       logger = ?, level = ?, thread = ?,
+                       log_message_template = ?, cause_chain = ?
                    WHERE id = ?""",
-                (timestamp_s, group_id)
+                (timestamp_s, canonical_frames_json, canonical_trace_json,
+                 *_descriptive_columns(event), group_id)
             )
-            if row['needs_context'] and event.level:
-                # Backfill a group stored before these columns existed. Without
-                # this the groups that most need a cause chain - the long-lived
-                # ones - would never get one, since a group row is written once
-                # and only updated after that.
-                #
-                # `event.level` is required so this stays a one-off per group.
-                # /ingest is unauthenticated and does not constrain the field, so
-                # a payload with an empty level would otherwise leave the group
-                # flagged and re-run this on every subsequent occurrence.
-                conn.execute(
-                    """UPDATE error_groups
-                       SET level = ?, log_message_template = ?, cause_chain = ?
-                       WHERE id = ?""",
-                    (*_log_context(event), group_id)
-                )
 
-        conn.execute(
-            'INSERT INTO occurrences (group_id, server, timestamp, message, log_message) '
-            'VALUES (?, ?, ?, ?, ?)',
-            (group_id, event.server_id, timestamp_s, raw_message, event.message)
-        )
-
-        conn.execute(
+        # Bumped before the occurrence insert so its post-increment value can gate
+        # raw_event without a second count query.
+        hour_count = conn.execute(
             """INSERT INTO server_hour_counts (group_id, server, hour_bucket, count)
                VALUES (?, ?, ?, 1)
                ON CONFLICT (group_id, server, hour_bucket)
-               DO UPDATE SET count = count + 1""",
+               DO UPDATE SET count = count + 1
+               RETURNING count""",
             (group_id, event.server_id, hour_bucket)
+        ).fetchone()['count']
+
+        raw_event = (
+            zlib.compress(event.model_dump_json().encode('utf-8'))
+            if hour_count <= RAW_EVENT_CAP else None
+        )
+
+        conn.execute(
+            'INSERT INTO occurrences '
+            '(group_id, server, timestamp, message, log_message, raw_event) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (group_id, event.server_id, timestamp_s, raw_message, event.message,
+             raw_event)
         )
 
     return fingerprint, is_new

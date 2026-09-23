@@ -31,6 +31,7 @@ class FrameSummary:
     method: str
     file: Optional[str]
     line: int  # -1 if unknown (native method or compiled without debug info)
+    location: Optional[str] = None  # source jar, e.g. "Monumenta.jar"
 
 
 @dataclass
@@ -97,9 +98,10 @@ class GroupDetails:
     servers_affected: list[str]           # servers seen within the retention window
     server_counts_24h: dict[str, int]     # fixed 24-hour window
     hourly_timeline: list[tuple[datetime, int]]  # (hour_start, count), fixed 7-day window
-    # Log-event context, captured once per group. An empty `level` means the
-    # group has not been seen since these columns were added. See SCHEMA.md.
+    # How the newest occurrence was reported. Refreshed on every occurrence, so
+    # these describe current behaviour rather than the group's first sighting.
     level: str = ''
+    thread: str = ''
     log_message_template: str = ''        # normalized; NOT the exception's own message
     cause_chain: list[CauseSummary] = field(default_factory=list[CauseSummary])
     latest_message: Optional[str] = None  # most recent raw (un-normalized) exception message
@@ -123,6 +125,7 @@ def _frames_from_dicts(items: list[dict[str, Any]]) -> list[FrameSummary]:
             method=f['method'],
             file=f.get('file'),
             line=f.get('line', -1),
+            location=f.get('location'),
         )
         for f in items
     ]
@@ -312,7 +315,7 @@ class Tracker:
         row = self._conn.execute(
             """SELECT id, fingerprint, exception_class, message_template,
                       status, first_seen, last_seen, total_count,
-                      logger, level, log_message_template, cause_chain,
+                      logger, level, thread, log_message_template, cause_chain,
                       canonical_frames, canonical_trace,
                       muted_by, muted_at, resolved_by, resolved_at
                FROM error_groups
@@ -367,6 +370,7 @@ class Tracker:
             server_counts_24h=self._get_server_counts(group_id, cutoff_24h),
             hourly_timeline=[(_ts_to_dt(r['hour']), r['count']) for r in timeline_rows],
             level=row['level'],
+            thread=row['thread'],
             log_message_template=row['log_message_template'],
             cause_chain=_causes_from_json(row['cause_chain']),
             latest_message=latest_message,
