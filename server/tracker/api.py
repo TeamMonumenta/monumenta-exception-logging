@@ -94,7 +94,7 @@ class GroupDetails:
     total_count: int
     logger: str
     canonical_frames: list[FrameSummary]  # top app frames that were hashed into the fingerprint
-    canonical_trace: list[FrameSummary]   # full stack trace captured from the first occurrence only
+    canonical_trace: list[FrameSummary]   # full stack trace, refreshed each occurrence
     servers_affected: list[str]           # servers seen within the retention window
     server_counts_24h: dict[str, int]     # fixed 24-hour window
     hourly_timeline: list[tuple[datetime, int]]  # (hour_start, count), fixed 7-day window

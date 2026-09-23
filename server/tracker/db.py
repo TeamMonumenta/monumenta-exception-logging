@@ -70,7 +70,8 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             -- lives, e.g. the task id in Paper's "Task #N ... generated an exception".
             log_message TEXT NOT NULL DEFAULT '',
             -- zlib-compressed original ingest payload. NULL past RAW_EVENT_CAP
-            -- occurrences for the same group and hour. This is what makes a future
+            -- occurrences for the same group, server and hour, or when the payload
+            -- exceeds RAW_EVENT_MAX_BYTES compressed. This is what makes a future
             -- regrouping a rebuild rather than a wipe: it is the only per-occurrence
             -- record of the fingerprint inputs, and therefore the only way to split
             -- a group. See SCHEMA.md.
