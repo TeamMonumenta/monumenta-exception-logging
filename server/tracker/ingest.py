@@ -2,6 +2,7 @@
 # Copyright (C) 2026 Byron Marohn
 import json
 import sqlite3
+import time
 import zlib
 from collections.abc import Iterable
 from typing import Any, Optional
@@ -98,6 +99,25 @@ def flatten_cause_chain(exc: ExceptionModel) -> list[dict[str, Any]]:
 # into gigabytes. See SCHEMA.md.
 RAW_EVENT_CAP = 50
 
+# A single payload can be legitimately large (a deep chain of wide traces), but the
+# cap above counts occurrences, not bytes, so one more bound is needed: the caps in
+# flatten_cause_chain truncate the cause_chain column, not the stored payload.
+RAW_EVENT_MAX_BYTES = 65536
+
+# timestamp_ms is client-supplied on an unauthenticated endpoint, and it selects the
+# hour bucket that drives timelines, per-server counts and the raw_event cap. A caller
+# that steps it forward on every event lands in a fresh bucket each time, so the cap
+# never trips and the timeline extends indefinitely into the future. Only the future
+# side needs bounding: a backdated event lands in a bucket expiry is already sweeping,
+# so it limits itself. The allowance covers a server whose clock is merely off.
+_MAX_CLOCK_SKEW_S = 300
+
+
+def clamp_timestamp(timestamp_s: int, now_s: Optional[int] = None) -> int:
+    """Stop a client-supplied event time running ahead of the server's own clock."""
+    now = int(time.time()) if now_s is None else now_s
+    return min(timestamp_s, now + _MAX_CLOCK_SKEW_S)
+
 
 def build_signature(
     exception_class: str, normalized_message: str, top_frames: list[dict[str, Any]]
@@ -133,7 +153,7 @@ def _descriptive_columns(event: IngestEvent) -> tuple[str, str, str, str, str]:
 def ingest_event(
     event: IngestEvent, conn: sqlite3.Connection, config: TrackerConfig
 ) -> tuple[str, bool]:
-    timestamp_s = event.timestamp_ms // 1000
+    timestamp_s = clamp_timestamp(event.timestamp_ms // 1000)
     hour_bucket = (timestamp_s // 3600) * 3600
 
     frames = [f.model_dump() for f in event.exception.frames]
@@ -193,10 +213,11 @@ def ingest_event(
             (group_id, event.server_id, hour_bucket)
         ).fetchone()['count']
 
-        raw_event = (
-            zlib.compress(event.model_dump_json().encode('utf-8'))
-            if hour_count <= RAW_EVENT_CAP else None
-        )
+        raw_event = None
+        if hour_count <= RAW_EVENT_CAP:
+            compressed = zlib.compress(event.model_dump_json().encode('utf-8'))
+            if len(compressed) <= RAW_EVENT_MAX_BYTES:
+                raw_event = compressed
 
         conn.execute(
             'INSERT INTO occurrences '

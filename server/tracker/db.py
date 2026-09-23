@@ -310,7 +310,7 @@ def migrate_fingerprints(
     from .ingest import build_signature  # pylint: disable=import-outside-toplevel
 
     rows = conn.execute(
-        "SELECT id, fingerprint, exception_class, message_template, "
+        "SELECT id, fingerprint, exception_class, message_template, signature, "
         "canonical_trace, discord_message_id, total_count, first_seen, last_seen "
         "FROM error_groups"
     ).fetchall()
@@ -329,9 +329,12 @@ def migrate_fingerprints(
             # re-normalize an already-normalized value, which is not a no-op:
             # nested bracket data loses one nesting level per pass.
             frames = json.loads(row['canonical_trace'])
+            # id breaks the tie: timestamps are client-supplied and second-granular,
+            # so ties are normal, and without it which message defines the group is
+            # arbitrary and can differ between two runs over the same data.
             raw_row = conn.execute(
                 "SELECT message FROM occurrences WHERE group_id = ? "
-                "ORDER BY timestamp DESC LIMIT 1",
+                "ORDER BY timestamp DESC, id DESC LIMIT 1",
                 (row['id'],)
             ).fetchone()
             # A group whose occurrences have all aged out has no raw message left;
@@ -345,6 +348,15 @@ def migrate_fingerprints(
                 row['exception_class'], new_normalized, top_frames)
 
             if new_fp == row['fingerprint']:
+                # Unchanged identity, but the stored inputs may predate the column.
+                # Writing them here is what populates signature for groups that were
+                # inserted before it existed; nothing else can, since ingest only
+                # writes it on insert.
+                if row['signature'] != new_signature:
+                    conn.execute(
+                        "UPDATE error_groups SET signature = ? WHERE id = ?",
+                        (new_signature, row['id'])
+                    )
                 continue
 
             winner = conn.execute(

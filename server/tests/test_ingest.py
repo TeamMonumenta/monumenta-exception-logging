@@ -12,6 +12,7 @@ import json
 import sys
 import os
 import sqlite3
+import time
 import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -19,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import pytest
 from tracker.config import TrackerConfig
 from tracker.api import Tracker
+from tracker.fingerprint import compute_fingerprint, extract_app_frames, normalize_message
 from tracker.ingest import RAW_EVENT_CAP, parse_event
 from tests.fixtures import (
     EXAMPLE_EVENT,
@@ -402,7 +404,12 @@ def test_fingerprint_inputs_are_not_rewritten(fresh_api):
     fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
     before = fresh_api._conn.execute(  # pylint: disable=protected-access
         'SELECT signature, message_template FROM error_groups').fetchone()
-    fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    # A different raw message that normalizes to the same template, so it joins the
+    # same group - the only way this assertion can actually fail.
+    variant = copy.deepcopy(_WRAPPED_EVENT)
+    variant['exception']['message'] = 'Task #55 for Monumenta v11.84.2 generated an exception'
+    _, is_new = fresh_api.ingest_event(parse_event(variant))
+    assert is_new is False
     after = fresh_api._conn.execute(  # pylint: disable=protected-access
         'SELECT signature, message_template FROM error_groups').fetchone()
     assert before['signature'] == after['signature']
@@ -693,3 +700,126 @@ def test_refingerprint_normalizes_from_a_raw_message(fresh_api):
         'SELECT message_template FROM error_groups').fetchall()
     assert len(rows) == 1
     assert rows[0]['message_template'] == template
+
+
+def test_raw_event_cap_is_not_defeated_by_advancing_the_clock(fresh_api):
+    """timestamp_ms picks the hour bucket and is client-supplied on an open endpoint.
+
+    Stepping it forward on every event would otherwise land in a fresh bucket every time and
+    the cap would never trip.
+    """
+    for i in range(RAW_EVENT_CAP + 20):
+        event = copy.deepcopy(_WRAPPED_EVENT)
+        event['timestamp_ms'] = int(time.time() * 1000) + i * 3_600_000
+        fresh_api.ingest_event(parse_event(event))
+    kept = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT COUNT(*) c FROM occurrences WHERE raw_event IS NOT NULL').fetchone()['c']
+    assert kept == RAW_EVENT_CAP
+
+
+def test_clamped_timestamps_do_not_extend_the_timeline_into_the_future(fresh_api):
+    future = copy.deepcopy(_WRAPPED_EVENT)
+    future['timestamp_ms'] = int((time.time() + 86400 * 30) * 1000)
+    fp, _ = fresh_api.ingest_event(parse_event(future))
+    assert fresh_api.get_group_details(fp).last_seen.timestamp() <= time.time() + 600
+
+
+def test_an_oversized_payload_is_not_stored(fresh_api):
+    """The cause caps truncate the cause_chain column, not the stored payload."""
+    huge = copy.deepcopy(_WRAPPED_EVENT)
+    # Incompressible by construction - repetitive padding would zlib down under the
+    # limit and prove nothing.
+    huge['exception']['frames'] = [
+        {'class_name': 'com.playmonumenta.plugins.P' + os.urandom(64).hex(),
+         'method': 'run', 'file': 'P.java', 'line': i, 'location': 'Monumenta.jar'}
+        for i in range(1200)
+    ]
+    fp, _ = fresh_api.ingest_event(parse_event(huge))
+    row = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT raw_event FROM occurrences').fetchone()
+    assert row['raw_event'] is None
+    # The occurrence itself is still recorded; only the payload is dropped.
+    assert fresh_api.get_group_details(fp).total_count == 1
+
+
+# ---------------------------------------------------------------------------
+# The property raw_event exists for
+# ---------------------------------------------------------------------------
+
+def test_occurrences_can_be_regrouped_from_their_stored_payloads(fresh_api):
+    """A future rule change must be answerable from what is stored.
+
+    Two events that group together today are re-fingerprinted from raw_event under a
+    wider application-package list and separate - the split that migrate_fingerprints
+    cannot perform, done from per-occurrence data.
+    """
+    # Three identical platform frames first: with no com.playmonumenta frame anywhere,
+    # extract_app_frames falls back to frames[:3], so both events hash identically and
+    # the frame that actually differs sits below the fallback window. This is the
+    # shape that makes distinct bugs share one group today.
+    scheduler = [
+        {'class_name': 'org.bukkit.Scheduler', 'method': f'tick{i}', 'file': 'S.java',
+         'line': i, 'location': None}
+        for i in range(3)
+    ]
+    a = copy.deepcopy(_WRAPPED_EVENT)
+    a['exception']['frames'] = scheduler + [
+        {'class_name': 'com.vendor.alpha.One', 'method': 'go', 'file': 'A.java',
+         'line': 2, 'location': 'Alpha.jar'}]
+    b = copy.deepcopy(a)
+    b['exception']['frames'] = scheduler + [
+        {'class_name': 'com.vendor.beta.Two', 'method': 'go', 'file': 'B.java',
+         'line': 3, 'location': 'Beta.jar'}]
+
+    fp_a, _ = fresh_api.ingest_event(parse_event(a))
+    fp_b, _ = fresh_api.ingest_event(parse_event(b))
+    assert fp_a == fp_b  # one group today: no app frame, so both fall back to Scheduler
+
+    rows = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT raw_event FROM occurrences ORDER BY id').fetchall()
+    regrouped = set()
+    for row in rows:
+        event = parse_event(json.loads(zlib.decompress(row['raw_event']).decode('utf-8')))
+        frames = [f.model_dump() for f in event.exception.frames]
+        top = extract_app_frames(frames, ['com.vendor'], 3)
+        regrouped.add(compute_fingerprint(
+            event.exception.class_name,
+            normalize_message(event.exception.message or ''), top))
+    assert len(regrouped) == 2
+
+
+def test_refingerprint_agrees_with_ingest(fresh_api):
+    """Migration must land on the fingerprint ingest would produce for the same event.
+
+    Deriving from message_template instead of a raw message normalizes an already
+    normalized value. For nested bracket data that is not a no-op, so migration and
+    ingest disagree permanently: each restart renames the group and the next
+    occurrence recreates the original under ingest's own fingerprint.
+    """
+    event = copy.deepcopy(_WRAPPED_EVENT)
+    event['exception']['message'] = 'Entity at [x=1, y=2, z=[a, b]] failed'
+    fp, _ = fresh_api.ingest_event(parse_event(event))
+
+    from tracker.db import migrate_fingerprints
+    for _ in range(3):
+        migrate_fingerprints(fresh_api._conn, ['com.playmonumenta'])  # pylint: disable=protected-access
+        again, is_new = fresh_api.ingest_event(parse_event(event))
+        assert is_new is False, 'migration moved the group away from ingest'
+        assert again == fp
+    assert fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT COUNT(*) c FROM error_groups').fetchone()['c'] == 1
+
+
+def test_refingerprint_backfills_signature_for_older_groups(fresh_api):
+    """ingest writes signature only on insert, so nothing else can populate it."""
+    fp, _ = fresh_api.ingest_event(parse_event(_WRAPPED_EVENT))
+    fresh_api._conn.execute("UPDATE error_groups SET signature = ''")  # pylint: disable=protected-access
+    fresh_api._conn.commit()  # pylint: disable=protected-access
+
+    from tracker.db import migrate_fingerprints
+    migrate_fingerprints(fresh_api._conn, ['com.playmonumenta'])  # pylint: disable=protected-access
+
+    sig = fresh_api._conn.execute(  # pylint: disable=protected-access
+        'SELECT signature FROM error_groups').fetchone()['signature']
+    assert json.loads(sig)['message_template'] == \
+        fresh_api.get_group_details(fp).message_template
