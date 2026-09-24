@@ -123,7 +123,7 @@ def _apply_review_event(
             last_reviewer = reviewer
         elif review_state == "commented":
             # A comment from the PR author on their own PR never signals
-            # "needs attention" — only other users' comments do.
+            # "needs attention"; only other users' comments do.
             if status == "none" and (not pr_author or reviewer != pr_author):
                 status = "commented"
                 last_reviewer = reviewer
@@ -160,11 +160,11 @@ def compute_desired_reactions(
 
     desired: set[str] = set()
 
-    # ✅ approved — every linked PR has review_status == approved
+    # ✅ approved: every linked PR has review_status == approved
     if all(p.review_status == "approved" for p in prs):
         desired.add(config.reaction_approved)
 
-    # 💬 changes — any open PR needs changes (or has comment if REVIEW_COMMENT_IS_CHANGES)
+    # 💬 changes: any open PR needs changes (or has comment if REVIEW_COMMENT_IS_CHANGES)
     for p in open_prs:
         if p.review_status == "changes_requested":
             desired.add(config.reaction_changes)
@@ -173,13 +173,13 @@ def compute_desired_reactions(
             desired.add(config.reaction_changes)
             break
 
-    # Label reactions — any open PR carrying the label (🟢/🟠/🧪/⚖️).
+    # Label reactions: any open PR carrying the label (🟢/🟠/🧪/⚖️).
     # Drop off naturally once the message is terminal (open_prs empty).
     for p in open_prs:
         for category in _parse_label_categories(p.labels):
             desired.add(config.label_reaction(category))
 
-    # 🐶 checks failing — any open PR has a failing automated check.
+    # 🐶 checks failing: any open PR has a failing automated check.
     if any(p.checks_failing for p in open_prs):
         desired.add(config.reaction_checks_failed)
 
@@ -265,7 +265,7 @@ def _format_dm(
 
 def _pr_sort_key(pr: PrRow) -> tuple[int, int, int]:
     # approved first (merge candidates), then no-review/commented (reviewers can act),
-    # then changes_requested last (waiting on author — least actionable for reviewers)
+    # then changes_requested last (waiting on author, least actionable for reviewers)
     review_order = {"approved": 0, "none": 1, "commented": 1, "changes_requested": 2}
     cats = _parse_label_categories(pr.labels)
     return (
@@ -359,7 +359,7 @@ class PrBot(commands.Bot):
                 for lnk in self.store.get_links_for_message(ref_id)
             ]
 
-        # Referenced message not tracked — fetch it and parse its content.
+        # Referenced message not tracked; fetch it and parse its content.
         referenced = await self._fetch_referenced_message(ref, ref.message_id)
         if referenced is None or str(referenced.author.id) != author_id:
             return []  # gone, or not a self-reply
@@ -573,7 +573,7 @@ class PrBot(commands.Bot):
         try:
             await message.clear_reaction(emoji)
         except discord.Forbidden:
-            # No Manage Messages — remove only our own reaction
+            # No Manage Messages; remove only our own reaction
             try:
                 if self.user:
                     await message.remove_reaction(emoji, self.user)
@@ -703,7 +703,7 @@ class PrBot(commands.Bot):
 
         # Collect distinct recipient author_ids and their applicable transitions.
         # Using a set per author dedupes the case where the same user posted the
-        # same PR link in multiple messages — otherwise they'd get one DM per message.
+        # same PR link in multiple messages, otherwise they'd get one DM per message.
         recipient_transitions: dict[str, set[str]] = {}
         if status_changed and new_status in ("approved", "changes_requested", "commented") \
                 and actor != pr_author:
@@ -1025,7 +1025,7 @@ class PrBot(commands.Bot):
         for msg in messages:
             await self.reconcile_message(msg.message_id)
 
-        # DM for missed transitions — same gating as live webhook path, deduped by author_id
+        # DM for missed transitions, same gating as live webhook path, deduped by author_id
         seen_authors: set[str] = set()
         for msg in messages:
             if msg.done:

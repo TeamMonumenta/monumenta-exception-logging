@@ -229,7 +229,7 @@ def test_cause_chain_is_parsed():
 
 
 def test_different_cause_chains_same_top_level_same_group(fresh_api):
-    """The cause chain must not influence the fingerprint — only the top-level
+    """The cause chain must not influence the fingerprint. Only the top-level
     exception class, message, and frames matter."""
     cause_a = {
         'class_name': 'java.io.IOException',

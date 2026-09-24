@@ -372,7 +372,7 @@ def test_quote_id_escapes_path_separators():
 
 
 # ===========================================================================
-# HTTP error mapping — what the user actually sees when something is wrong
+# HTTP error mapping: what the user actually sees when something is wrong
 # ===========================================================================
 
 def _http_error(code: int, body: bytes) -> urllib.error.HTTPError:
@@ -479,7 +479,7 @@ def test_request_bypasses_proxies():
 
 
 # ===========================================================================
-# Response envelope parsing — these break loudly if the API's shape changes
+# Response envelope parsing: these break loudly if the API's shape changes
 # ===========================================================================
 
 def _capture_request(response):

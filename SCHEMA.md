@@ -376,7 +376,7 @@ next rule's input.
 | 10 | Bracketed data | `<data>` | `[...]` up to 256 characters, innermost brackets only; boss tag lists, NBT |
 | 11 | `Location{world=...{...}...}` block | `Location{<location>}` | one level of nested braces |
 
-The order is load-bearing in four places:
+The order matters in four places:
 
 - Bare UUIDs (2) are consumed before long tokens (5), so a 32-hex-character UUID always
   becomes `<uuid>` rather than `<id>`.

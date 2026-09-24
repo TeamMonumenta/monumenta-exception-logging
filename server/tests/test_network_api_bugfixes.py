@@ -71,7 +71,7 @@ def _make_details(status: str, muted_by=None, muted_at=None,
 
 
 # ===========================================================================
-# §5.1 Fix 1 — _fmt_details_lines status guard
+# §5.1 Fix 1: _fmt_details_lines status guard
 # ===========================================================================
 
 def test_details_lines_no_muted_line_when_active_with_stale_muted_by():
@@ -117,7 +117,7 @@ def test_details_lines_shows_resolved_line_when_actually_resolved():
 
 
 # ===========================================================================
-# §5.2 — has_activity set on mutation, cleared only on a successful Discord edit
+# §5.2: has_activity set on mutation, cleared only on a successful Discord edit
 # ===========================================================================
 
 def test_mute_makes_group_appear_in_active_discord_messages(fresh_api):
@@ -167,7 +167,7 @@ def test_edit_exception_message_survives_failed_edit(fresh_api, bot):
 
 def test_edit_exception_message_not_found_does_not_touch_flag(fresh_api, bot):
     """discord.NotFound clears the tracked message ID and should NOT clear
-    has_activity — the group is picked up by _backfill_missing_messages instead."""
+    has_activity; the group is picked up by _backfill_missing_messages instead."""
     fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
     fresh_api.set_discord_message_id(fp, "111111111111111111")
     fresh_api.mute_group(fp, actor="Alice")
@@ -212,7 +212,7 @@ def test_edit_failures_stop_retrying_after_the_ceiling(fresh_api, bot):
 
 
 def test_edit_failure_counter_resets_after_a_success(fresh_api, bot):
-    """The ceiling counts *consecutive* failures — an intermittent failure must not
+    """The ceiling counts *consecutive* failures. An intermittent failure must not
     accumulate toward giving up."""
     fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
     fresh_api.set_discord_message_id(fp, "111111111111111111")

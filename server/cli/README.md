@@ -94,7 +94,7 @@ configured proxy can't make a reachable server look unreachable.
 
 Mutating commands (`mute`, `unmute`, `reopen`, `resolve`, `fix`) require a bearer
 token that proves which Discord account you are. Run `/api-token create` in Discord
-(optionally with a `lifetime_hours` argument) — it replies ephemerally with a token,
+(optionally with a `lifetime_hours` argument). It replies ephemerally with a token,
 shown once, and its expiry. Set it as `$EXCTL_API_TOKEN`:
 
 ```bash

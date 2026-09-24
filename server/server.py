@@ -175,7 +175,7 @@ def _resolve_fingerprint(tracker: Tracker, id_: str) -> Optional[str]:
     """
     normalized = id_.lower()
     if len(normalized) == 64:
-        # Cheap existence check — the caller re-reads full details when it needs them.
+        # Cheap existence check; the caller re-reads full details when it needs them.
         return normalized if tracker.group_exists(normalized) else None
     return tracker.get_fingerprint_by_short_id(normalized)
 
@@ -240,7 +240,7 @@ def create_app(
         404s if the group vanished between the mutation and this read (an expiry or a
         /purge racing the request). Returning a status explicitly rather than asserting
         keeps the race a 404 instead of a 500, and does not depend on assertions being
-        enabled — `python -O` strips them.
+        enabled, since `python -O` strips them.
         """
         details = tracker.get_group_details(fingerprint)
         if details is None:
@@ -413,7 +413,7 @@ def create_app(
     @app.post('/api/groups/<group_id>/unmute')
     async def api_unmute_group(group_id: str):
         # Also un-resolves, matching /unmute's existing "always unmutes" semantics
-        # (README.md) — unmute_group clears both mute and resolve attribution.
+        # (README.md); unmute_group clears both mute and resolve attribution.
         fingerprint = _resolve_fingerprint(tracker, group_id)
         if fingerprint is None:
             return jsonify({'error': 'group not found'}), 404
@@ -473,7 +473,7 @@ def create_app(
             return jsonify({'error': 'group not found'}), 404
         if result.outcome == FixRequestOutcome.TEMPLATE_UNREADABLE:
             return jsonify({'error': 'fix prompt template could not be read'}), 500
-        # NOT_CONFIGURED can't happen here — chisel_public_url was checked above.
+        # NOT_CONFIGURED can't happen here since chisel_public_url was checked above.
         return jsonify({'error': 'fix request failed'}), 500
 
     # Quart's default error pages are HTML. For /api/* that means a typo'd path or an

@@ -42,7 +42,7 @@ def test_purge_server_removes_exclusive_group(fresh_api):
 def test_purge_server_spares_mixed_group(fresh_api):
     # fp1: only on build
     fp1, _ = fresh_api.ingest_event(parse_event(_event_from(EXAMPLE_EVENT, 'build')))
-    # fp2: on build AND play — should survive
+    # fp2: on build AND play, should survive
     fp2, _ = fresh_api.ingest_event(parse_event(_event_from(EXAMPLE_EVENT_2, 'build')))
     fresh_api.ingest_event(parse_event(_event_from(EXAMPLE_EVENT_2, 'play')))
 

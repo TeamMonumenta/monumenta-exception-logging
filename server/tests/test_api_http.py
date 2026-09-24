@@ -624,7 +624,7 @@ def test_mute_accepts_any_case_of_the_bearer_scheme(scheme):
 
 def test_mute_tolerates_extra_whitespace_after_the_scheme():
     """A stray extra space between 'Bearer' and the token must not be treated as
-    part of the token — that would blame the token for a spacing quirk."""
+    part of the token; that would blame the token for a spacing quirk."""
     async def _inner():
         tracker = Tracker(TrackerConfig(db_path=':memory:'))
         fp1, _ = tracker.ingest_event(parse_event(EXAMPLE_EVENT))
@@ -698,7 +698,7 @@ def test_mute_works_with_discord_entirely_disabled():
 
 
 # ===========================================================================
-# POST /api/groups/<id>/fix — status-code precedence
+# POST /api/groups/<id>/fix: status-code precedence
 # ===========================================================================
 
 @pytest.fixture
@@ -763,7 +763,7 @@ def test_fix_not_in_allowed_users_403(prompt_path):
 
 def test_fix_in_allowed_users_200(prompt_path):
     """The allow-list must be checked against the token's verified discord_id, not
-    against anything else — this is the positive case for test_fix_not_in_allowed_users_403
+    against anything else. This is the positive case for test_fix_not_in_allowed_users_403
     above, proving a match (not just a mismatch) is actually recognized."""
     async def _inner():
         tracker = Tracker(TrackerConfig(db_path=':memory:'))
@@ -899,7 +899,7 @@ def test_fix_rejected_does_not_dispatch_working_reaction(prompt_path):
 # ===========================================================================
 
 def test_get_group_by_uppercase_full_fingerprint():
-    """Uppercase must work for the full fingerprint too, not just the short ID —
+    """Uppercase must work for the full fingerprint too, not just the short ID;
     otherwise an ID pasted from a log 404s in one form and resolves in the other."""
     async def _inner():
         tracker = Tracker(TrackerConfig(db_path=':memory:'))

@@ -176,12 +176,12 @@ def _format_api_token_created_message(token: str, expires_at: int, prefix: str) 
     parsed as italics/underline, silently dropping characters from what gets copied.
 
     The literal `{token}` in the second line is a placeholder in example text, not the
-    real secret — this is an f-string, so `{{token}}` is deliberately double-braced to
+    real secret. This is an f-string, so `{{token}}` is deliberately double-braced to
     produce that literal instead of interpolating (the actual secret only appears once,
     in the spoiler above).
     """
     return (
-        f"Token (expires <t:{expires_at}:R>), shown once — copy it now:\n"
+        f"Token (expires <t:{expires_at}:R>), shown once, copy it now:\n"
         f"||`{token}`||\n"
         f"Set it as `EXCTL_API_TOKEN` (or pass `--token`) for `exctl`, or send it "
         f"as `Authorization: Bearer {{token}}` directly. "
@@ -386,7 +386,7 @@ class ExceptionBot(commands.Bot):
                 if _matches_notify(pattern, details):
                     user_matches.setdefault(discord_user_id, []).append((sub_id, pattern))
             except re.error:
-                # Pattern somehow invalid (shouldn't happen — validated at add time).
+                # Pattern somehow invalid (shouldn't happen, validated at add time).
                 logger.warning("Invalid notify pattern #%d: %s", sub_id, pattern)
 
         for discord_user_id, matching_rules in user_matches.items():

@@ -406,7 +406,7 @@ def migrate_fingerprints(
                 )
                 if row['discord_message_id'] is not None:
                     if winner['discord_message_id'] is None:
-                        # Winner has no Discord message — adopt the loser's instead of deleting it.
+                        # Winner has no Discord message, so adopt the loser's instead of deleting it.
                         conn.execute(
                             "UPDATE error_groups SET discord_message_id = ? WHERE id = ?",
                             (row['discord_message_id'], winner['id'])
@@ -636,7 +636,7 @@ def count_api_tokens(conn: sqlite3.Connection, discord_id: str) -> int:
 def get_api_token(conn: sqlite3.Connection, token_hash: str) -> Optional[sqlite3.Row]:
     """Return the (discord_id, expires_at) row for a token hash, or None if unknown.
 
-    Does not check expiry — an expired-but-not-yet-swept row is still returned so
+    Does not check expiry; an expired-but-not-yet-swept row is still returned so
     callers can distinguish "expired" from "never existed" if they need to.
     """
     return conn.execute(

@@ -1,4 +1,4 @@
-# heap-logger DaemonSet — one cluster-wide instance
+# heap-logger DaemonSet: one cluster-wide instance
 #
 # Minecraft pods reach this service via internalTrafficPolicy: Local, which routes
 # traffic to the DaemonSet pod on the same node. Set HEAPLOG_INGEST_URL in each

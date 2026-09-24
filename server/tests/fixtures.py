@@ -12,7 +12,7 @@ _NOW_MS = int(time.time() * 1000)
 # Real production exceptions extracted from server logs
 # ---------------------------------------------------------------------------
 
-# From blue_latest.log — NullPointerException with a Java 17+ "helpful NPE"
+# From blue_latest.log: NullPointerException with a Java 17+ "helpful NPE"
 # message containing double-quoted class and field names.
 REAL_NPE_ALLAY = {
     'schema_version': 1,
@@ -97,7 +97,7 @@ REAL_NPE_ALLAY = {
     },
 }
 
-# From ring_latest.log — IllegalStateException thrown on an async thread that
+# From ring_latest.log: IllegalStateException thrown on an async thread that
 # tried to call a main-thread-only API (play sound).  The com.playmonumenta
 # frames are NOT at the top of the stack; they appear after spigot frames.
 REAL_ILLEGAL_STATE_ASYNC_SOUND = {
@@ -236,7 +236,7 @@ REAL_ILLEGAL_STATE_ASYNC_SOUND = {
     },
 }
 
-# From isles_latest.log — IllegalArgumentException thrown in a scheduled task.
+# From isles_latest.log: IllegalArgumentException thrown in a scheduled task.
 REAL_ILLEGAL_ARG_HITBOX = {
     'schema_version': 1,
     'server_id': 'isles',
@@ -331,7 +331,7 @@ REAL_ILLEGAL_ARG_HITBOX = {
     },
 }
 
-# From isles_latest.log — ConcurrentModificationException from TAB plugin.
+# From isles_latest.log: ConcurrentModificationException from TAB plugin.
 # The com.playmonumenta frames appear deep in the stack (positions 11–14),
 # after JDK and third-party TAB plugin frames.  Message is null.
 REAL_CME_TAB = {

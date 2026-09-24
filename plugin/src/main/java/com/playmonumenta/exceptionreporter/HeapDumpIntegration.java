@@ -80,16 +80,16 @@ class HeapDumpIntegration {
 	 */
 	void triggerDump() {
 		if (!mDumpInProgress.compareAndSet(false, true)) {
-			mLogger.warning("[HeapDump] Already in progress — skipping trigger");
+			mLogger.warning("[HeapDump] Already in progress, skipping trigger");
 			return;
 		}
 
-		mLogger.info("[HeapDump] LowMemoryEvent received — triggering spark heapdump");
+		mLogger.info("[HeapDump] LowMemoryEvent received, triggering spark heapdump");
 
 		// Reset the in-flight guard if spark never logs a completion line (e.g. crash).
 		Bukkit.getScheduler().runTaskLaterAsynchronously(mPlugin, () -> {
 			if (mDumpInProgress.compareAndSet(true, false)) {
-				mLogger.warning("[HeapDump] Command timed out — spark never logged an .hprof path");
+				mLogger.warning("[HeapDump] Command timed out: spark never logged an .hprof path");
 			}
 		}, COMMAND_TIMEOUT_TICKS);
 
@@ -97,7 +97,7 @@ class HeapDumpIntegration {
 	}
 
 	private void onHeapDumpReady(String path) {
-		mLogger.info("[HeapDump] Spark complete, path=" + path + " — notifying heap-logger at " + mHeaplogUrl);
+		mLogger.info("[HeapDump] Spark complete, path=" + path + ", notifying heap-logger at " + mHeaplogUrl);
 
 		// Build JSON manually so we avoid a naming-convention conflict between the
 		// project's m-prefix field style and Gson's snake_case serialization.
@@ -155,7 +155,7 @@ class HeapDumpIntegration {
 			String path = m.group(1);
 			// Prevent concurrent processing if two completion messages arrive at once.
 			if (!mNotifyInFlight.compareAndSet(false, true)) {
-				mLogger.warning("[HeapDump] Concurrent completion detected — ignoring duplicate");
+				mLogger.warning("[HeapDump] Concurrent completion detected, ignoring duplicate");
 				return;
 			}
 			// Release the LowMemory dispatch guard so future events can trigger again.

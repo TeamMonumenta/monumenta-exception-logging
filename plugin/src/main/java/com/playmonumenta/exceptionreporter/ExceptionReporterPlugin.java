@@ -62,7 +62,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 		}
 
 		if (ingestUrl == null || ingestUrl.isBlank()) {
-			getLogger().warning("EXCEPTLOG_INGEST_URL not set — exception reporting disabled.");
+			getLogger().warning("EXCEPTLOG_INGEST_URL not set, exception reporting disabled.");
 		} else {
 			try {
 				new java.net.URI(ingestUrl);
@@ -91,10 +91,10 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 			if (autoHeapDump) {
 				tryRegisterAutoTrigger(heapDump);
 			} else {
-				getLogger().info("  HEAPLOG_AUTO_DUMP not set — auto-dump on LowMemoryEvent disabled");
+				getLogger().info("  HEAPLOG_AUTO_DUMP not set, auto-dump on LowMemoryEvent disabled");
 			}
 		} else if (heaplogUrl != null && !heaplogUrl.isBlank()) {
-			getLogger().warning("HEAPLOG_INGEST_URL is set but EXCEPTLOG_INGEST_URL is not — heap dump integration disabled.");
+			getLogger().warning("HEAPLOG_INGEST_URL is set but EXCEPTLOG_INGEST_URL is not, so heap dump integration is disabled.");
 		}
 
 		try {
@@ -116,10 +116,10 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 				Bukkit.getPluginManager().registerEvents(new NetworkRelayIntegration(heapDump), this);
 				getLogger().info("  Auto-dump on LowMemoryEvent enabled (MonumentaNetworkRelay present)");
 			} else {
-				getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay not found — auto-dump disabled");
+				getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay not found, auto-dump disabled");
 			}
 		} catch (NoClassDefFoundError e) {
-			getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay classes unavailable — auto-dump disabled");
+			getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay classes unavailable, auto-dump disabled");
 		}
 	}
 

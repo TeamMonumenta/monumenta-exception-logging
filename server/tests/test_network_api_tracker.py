@@ -381,7 +381,7 @@ def test_list_groups_paging_is_stable_when_sort_keys_tie(fresh_api):
 
 
 def test_list_groups_status_all_means_no_filter(fresh_api):
-    """'all' is accepted as an explicit synonym for None rather than rejected — it is
+    """'all' is accepted as an explicit synonym for None rather than rejected; it is
     the obvious thing for an API caller to try."""
     fp1, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
     fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))

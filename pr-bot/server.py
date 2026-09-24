@@ -86,8 +86,8 @@ def _configure_logging(verbose: bool) -> None:
     Set the root log level from VERBOSE: DEBUG when verbose, INFO otherwise.
 
     discord.py and aiohttp are extremely chatty at DEBUG (per-heartbeat gateway
-    traffic, every HTTP request), so they are pinned to INFO even in verbose mode —
-    verbose raises the detail of *our* logging, not the libraries'.
+    traffic, every HTTP request), so they are pinned to INFO even in verbose mode.
+    Verbose mode raises the detail of *our* logging, not the libraries'.
     """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
