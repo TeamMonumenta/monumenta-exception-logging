@@ -6,6 +6,7 @@ package com.playmonumenta.exceptionreporter;
 import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandMap;
@@ -24,15 +25,30 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 		String ingestUrl = System.getenv("EXCEPTLOG_INGEST_URL");
 		String rawServerName = System.getenv("EXCEPTLOG_SERVER_NAME");
 		String rawVerbose = System.getenv("EXCEPTLOG_VERBOSE");
+		String rawMinLevel = System.getenv("EXCEPTLOG_MIN_LEVEL");
 		String heaplogUrl = System.getenv("HEAPLOG_INGEST_URL");
 		String rawAutoHeapDump = System.getenv("HEAPLOG_AUTO_DUMP");
 		boolean autoHeapDump = rawAutoHeapDump != null && !rawAutoHeapDump.isBlank() && !rawAutoHeapDump.equalsIgnoreCase("false");
 
 		verbose = rawVerbose != null && !rawVerbose.isBlank() && !rawVerbose.equalsIgnoreCase("false");
 
+		// INFO rather than ERROR on purpose: most of what this tracker reports is
+		// logged at WARN. See "Reporting threshold" in the README before changing it.
+		//
+		// Level.toLevel falls back to the default for an unrecognized name, so a typo
+		// degrades to INFO rather than flooding or silencing the reporter. OFF would
+		// be recognized, but silently disables reporting, so it is rejected below.
+		Level minLevel = Level.toLevel(rawMinLevel == null ? "" : rawMinLevel.trim(), Level.INFO);
+		if (minLevel.equals(Level.OFF)) {
+			getLogger().warning("EXCEPTLOG_MIN_LEVEL=OFF would disable all reporting; using INFO. "
+				+ "Unset EXCEPTLOG_INGEST_URL to disable the reporter instead.");
+			minLevel = Level.INFO;
+		}
+
 		getLogger().info("  EXCEPTLOG_INGEST_URL=" + (ingestUrl != null ? ingestUrl : "(not set)"));
 		getLogger().info("  EXCEPTLOG_SERVER_NAME=" + (rawServerName != null ? rawServerName : "(not set, will use hostname)"));
 		getLogger().info("  EXCEPTLOG_VERBOSE=" + (rawVerbose != null ? rawVerbose : "(not set)") + " → verbose=" + verbose);
+		getLogger().info("  EXCEPTLOG_MIN_LEVEL=" + (rawMinLevel != null ? rawMinLevel : "(not set)") + " → minLevel=" + minLevel);
 		getLogger().info("  HEAPLOG_INGEST_URL=" + (heaplogUrl != null ? heaplogUrl : "(not set)"));
 		getLogger().info("  HEAPLOG_AUTO_DUMP=" + (rawAutoHeapDump != null ? rawAutoHeapDump : "(not set)") + " → autoHeapDump=" + autoHeapDump);
 
@@ -46,7 +62,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 		}
 
 		if (ingestUrl == null || ingestUrl.isBlank()) {
-			getLogger().warning("EXCEPTLOG_INGEST_URL not set — exception reporting disabled.");
+			getLogger().warning("EXCEPTLOG_INGEST_URL not set, exception reporting disabled.");
 		} else {
 			try {
 				new java.net.URI(ingestUrl);
@@ -58,7 +74,7 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 
 		if (ingestUrl != null) {
 			mSender = new HttpSender(ingestUrl, getLogger());
-			mAppender = new ExceptionAppender(serverName, mSender);
+			mAppender = new ExceptionAppender(serverName, mSender, minLevel);
 			mAppender.start();
 
 			// Attach directly to the core root Logger so the appender receives events from
@@ -75,10 +91,10 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 			if (autoHeapDump) {
 				tryRegisterAutoTrigger(heapDump);
 			} else {
-				getLogger().info("  HEAPLOG_AUTO_DUMP not set — auto-dump on LowMemoryEvent disabled");
+				getLogger().info("  HEAPLOG_AUTO_DUMP not set, auto-dump on LowMemoryEvent disabled");
 			}
 		} else if (heaplogUrl != null && !heaplogUrl.isBlank()) {
-			getLogger().warning("HEAPLOG_INGEST_URL is set but EXCEPTLOG_INGEST_URL is not — heap dump integration disabled.");
+			getLogger().warning("HEAPLOG_INGEST_URL is set but EXCEPTLOG_INGEST_URL is not, so heap dump integration is disabled.");
 		}
 
 		try {
@@ -100,10 +116,10 @@ public class ExceptionReporterPlugin extends JavaPlugin {
 				Bukkit.getPluginManager().registerEvents(new NetworkRelayIntegration(heapDump), this);
 				getLogger().info("  Auto-dump on LowMemoryEvent enabled (MonumentaNetworkRelay present)");
 			} else {
-				getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay not found — auto-dump disabled");
+				getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay not found, auto-dump disabled");
 			}
 		} catch (NoClassDefFoundError e) {
-			getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay classes unavailable — auto-dump disabled");
+			getLogger().warning("  HEAPLOG_AUTO_DUMP set but MonumentaNetworkRelay classes unavailable, auto-dump disabled");
 		}
 	}
 

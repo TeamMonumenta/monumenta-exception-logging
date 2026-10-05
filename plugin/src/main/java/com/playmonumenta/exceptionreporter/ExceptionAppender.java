@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.core.Appender;
@@ -26,12 +27,14 @@ public class ExceptionAppender extends AbstractAppender {
 	private final AtomicInteger mEventsThisSecond = new AtomicInteger(0);
 	private final String mServerId;
 	private final HttpSender mSender;
+	private final Level mMinLevel;
 	private volatile @Nullable Thread mRateLimitThread;
 
-	protected ExceptionAppender(String serverId, HttpSender sender) {
+	protected ExceptionAppender(String serverId, HttpSender sender, Level minLevel) {
 		super("MonumentaExceptionReporter", null, null, true, Property.EMPTY_ARRAY);
 		mServerId = serverId;
 		mSender = sender;
+		mMinLevel = minLevel;
 	}
 
 	@Override
@@ -66,6 +69,13 @@ public class ExceptionAppender extends AbstractAppender {
 	public void append(LogEvent event) {
 		Throwable thrown = event.getThrown();
 		if (thrown == null) {
+			return;
+		}
+		// Attaching via Logger.addAppender(Appender) registers with no level
+		// threshold, so the filtering has to happen here. Before the rate-limit
+		// counter, so dropped events don't consume budget a reportable one needs.
+		// mMinLevel must stay below ERROR - see "Reporting threshold" in the README.
+		if (!event.getLevel().isMoreSpecificThan(mMinLevel)) {
 			return;
 		}
 		if (mEventsThisSecond.getAndIncrement() >= MAX_EVENTS_PER_SECOND) {

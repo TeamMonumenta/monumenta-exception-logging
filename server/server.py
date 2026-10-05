@@ -11,7 +11,8 @@ from quart import Quart, jsonify, request
 from werkzeug.exceptions import HTTPException, InternalServerError
 
 from tracker.api import (
-    FixAttemptStatus, FrameSummary, GroupDetails, GroupSummary, OccurrenceSummary, Tracker,
+    CauseSummary, FixAttemptStatus, FrameSummary, GroupDetails, GroupSummary,
+    OccurrenceSummary, Tracker,
 )
 from tracker.chisel import FixRequestOutcome, request_fix
 from tracker.config import from_env
@@ -65,6 +66,15 @@ def _frame_to_json(frame: FrameSummary) -> dict[str, Any]:
         'method': frame.method,
         'file': frame.file,
         'line': frame.line,
+        'location': frame.location,
+    }
+
+
+def _cause_to_json(cause: CauseSummary) -> dict[str, Any]:
+    return {
+        'class_name': cause.class_name,
+        'message': cause.message,
+        'frames': [_frame_to_json(f) for f in cause.frames],
     }
 
 
@@ -92,12 +102,17 @@ def _details_to_json(d: GroupDetails) -> dict[str, Any]:
         'last_seen': int(d.last_seen.timestamp()),
         'total_count': d.total_count,
         'logger': d.logger,
+        'level': d.level,
+        'thread': d.thread,
+        'log_message_template': d.log_message_template,
+        'cause_chain': [_cause_to_json(c) for c in d.cause_chain],
         'canonical_frames': [_frame_to_json(f) for f in d.canonical_frames],
         'canonical_trace': [_frame_to_json(f) for f in d.canonical_trace],
         'servers_affected': d.servers_affected,
         'server_counts_24h': d.server_counts_24h,
         'hourly_timeline': [[int(ts.timestamp()), count] for ts, count in d.hourly_timeline],
         'latest_message': d.latest_message,
+        'latest_log_message': d.latest_log_message,
         'muted_by': d.muted_by,
         'muted_at': int(d.muted_at.timestamp()) if d.muted_at is not None else None,
         'resolved_by': d.resolved_by,
@@ -110,6 +125,7 @@ def _occurrence_to_json(o: OccurrenceSummary) -> dict[str, Any]:
         'timestamp': int(o.timestamp.timestamp()),
         'server': o.server,
         'message': o.message,
+        'log_message': o.log_message,
     }
 
 
@@ -159,7 +175,7 @@ def _resolve_fingerprint(tracker: Tracker, id_: str) -> Optional[str]:
     """
     normalized = id_.lower()
     if len(normalized) == 64:
-        # Cheap existence check — the caller re-reads full details when it needs them.
+        # Cheap existence check; the caller re-reads full details when it needs them.
         return normalized if tracker.group_exists(normalized) else None
     return tracker.get_fingerprint_by_short_id(normalized)
 
@@ -224,7 +240,7 @@ def create_app(
         404s if the group vanished between the mutation and this read (an expiry or a
         /purge racing the request). Returning a status explicitly rather than asserting
         keeps the race a 404 instead of a 500, and does not depend on assertions being
-        enabled — `python -O` strips them.
+        enabled, since `python -O` strips them.
         """
         details = tracker.get_group_details(fingerprint)
         if details is None:
@@ -397,7 +413,7 @@ def create_app(
     @app.post('/api/groups/<group_id>/unmute')
     async def api_unmute_group(group_id: str):
         # Also un-resolves, matching /unmute's existing "always unmutes" semantics
-        # (README.md) — unmute_group clears both mute and resolve attribution.
+        # (README.md); unmute_group clears both mute and resolve attribution.
         fingerprint = _resolve_fingerprint(tracker, group_id)
         if fingerprint is None:
             return jsonify({'error': 'group not found'}), 404
@@ -457,7 +473,7 @@ def create_app(
             return jsonify({'error': 'group not found'}), 404
         if result.outcome == FixRequestOutcome.TEMPLATE_UNREADABLE:
             return jsonify({'error': 'fix prompt template could not be read'}), 500
-        # NOT_CONFIGURED can't happen here — chisel_public_url was checked above.
+        # NOT_CONFIGURED can't happen here since chisel_public_url was checked above.
         return jsonify({'error': 'fix request failed'}), 500
 
     # Quart's default error pages are HTML. For /api/* that means a typo'd path or an

@@ -3,7 +3,7 @@
 """
 Internal Python API for the Monumenta exception tracker.
 
-Consumed directly by the Discord bot and any other internal tooling — this is
+Consumed directly by the Discord bot and any other internal tooling; this is
 not an HTTP API. All methods are synchronous. Callers in an async context
 should wrap calls with asyncio.get_event_loop().run_in_executor(None, func).
 """
@@ -14,7 +14,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -31,6 +31,15 @@ class FrameSummary:
     method: str
     file: Optional[str]
     line: int  # -1 if unknown (native method or compiled without debug info)
+    location: Optional[str] = None  # source jar, e.g. "Monumenta.jar"
+
+
+@dataclass
+class CauseSummary:
+    """One link in an exception's chained-cause list, outermost first."""
+    class_name: str
+    message: str
+    frames: list[FrameSummary]
 
 
 @dataclass
@@ -71,6 +80,7 @@ class OccurrenceSummary:
     timestamp: datetime
     server: str
     message: str
+    log_message: str = ''  # raw log message accompanying the throwable
 
 
 @dataclass
@@ -84,11 +94,18 @@ class GroupDetails:
     total_count: int
     logger: str
     canonical_frames: list[FrameSummary]  # top app frames that were hashed into the fingerprint
-    canonical_trace: list[FrameSummary]   # full stack trace captured from the first occurrence only
+    canonical_trace: list[FrameSummary]   # full stack trace, refreshed each occurrence
     servers_affected: list[str]           # servers seen within the retention window
     server_counts_24h: dict[str, int]     # fixed 24-hour window
     hourly_timeline: list[tuple[datetime, int]]  # (hour_start, count), fixed 7-day window
+    # How the newest occurrence was reported. Refreshed on every occurrence, so
+    # these describe current behaviour rather than the group's first sighting.
+    level: str = ''
+    thread: str = ''
+    log_message_template: str = ''        # normalized; NOT the exception's own message
+    cause_chain: list[CauseSummary] = field(default_factory=list[CauseSummary])
     latest_message: Optional[str] = None  # most recent raw (un-normalized) exception message
+    latest_log_message: Optional[str] = None  # most recent raw accompanying log message
     muted_by: Optional[str] = None
     muted_at: Optional[datetime] = None
     resolved_by: Optional[str] = None
@@ -101,15 +118,31 @@ def _ts_to_dt(ts: int) -> datetime:
     return datetime.fromtimestamp(ts, tz=timezone.utc)
 
 
-def _frames_from_json(json_str: str) -> list[FrameSummary]:
+def _frames_from_dicts(items: list[dict[str, Any]]) -> list[FrameSummary]:
     return [
         FrameSummary(
             class_name=f['class_name'],
             method=f['method'],
             file=f.get('file'),
             line=f.get('line', -1),
+            location=f.get('location'),
         )
-        for f in json.loads(json_str)
+        for f in items
+    ]
+
+
+def _frames_from_json(json_str: str) -> list[FrameSummary]:
+    return _frames_from_dicts(json.loads(json_str))
+
+
+def _causes_from_json(json_str: str) -> list[CauseSummary]:
+    return [
+        CauseSummary(
+            class_name=c['class_name'],
+            message=c.get('message', ''),
+            frames=_frames_from_dicts(c.get('frames', [])),
+        )
+        for c in json.loads(json_str or '[]')
     ]
 
 
@@ -150,14 +183,14 @@ def _row_to_summary(
 # --- list_groups / count_groups constants ---
 
 # 'all' is accepted as an explicit synonym for "no status filter" (i.e. None). Callers
-# reach for it naturally — ?status=all reads better than omitting the parameter — and
-# rejecting it with a 400 was a needless trap.
+# reach for it naturally, since ?status=all reads better than omitting the parameter,
+# and rejecting it with a 400 was a needless trap.
 _VALID_STATUSES = ('active', 'muted', 'resolved', 'all')
 
 # Maps an accepted `sort` value to the ORDER BY column expression. 'recent' is handled
 # separately (it orders by a windowed aggregate, not a plain error_groups column) but is
-# still a valid `sort` value — see _VALID_SORTS. This is the one place a request value is
-# interpolated into SQL, so it must stay a literal allowlist — never build this dict from
+# still a valid `sort` value; see _VALID_SORTS. This is the one place a request value is
+# interpolated into SQL, so it must stay a literal allowlist. Never build this dict from
 # request input.
 _SORT_COLUMNS: dict[str, str] = {
     'last_seen': 'g.last_seen',
@@ -188,7 +221,7 @@ class Tracker:
         """Process one exception event from the plugin. Returns (fingerprint, is_new_group).
 
         is_new_group is True when the group is first inserted (not previously in the DB).
-        Status is never changed by ingest — active, muted, and resolved groups all
+        Status is never changed by ingest; active, muted, and resolved groups all
         receive count and last_seen updates. A resolved group will stop updating
         naturally once the fix reaches production and then age out via expiry.
         """
@@ -231,7 +264,7 @@ class Tracker:
         """Return groups first seen within the `hours`-hour window ending at `before`.
 
         If `before` is None the window ends at the current time.
-        Includes groups of all statuses — a newly detected exception that was
+        Includes groups of all statuses; a newly detected exception that was
         immediately muted or resolved still appears here.
         """
         end = before if before is not None else int(time.time())
@@ -282,7 +315,8 @@ class Tracker:
         row = self._conn.execute(
             """SELECT id, fingerprint, exception_class, message_template,
                       status, first_seen, last_seen, total_count,
-                      logger, canonical_frames, canonical_trace,
+                      logger, level, thread, log_message_template, cause_chain,
+                      canonical_frames, canonical_trace,
                       muted_by, muted_at, resolved_by, resolved_at
                FROM error_groups
                WHERE fingerprint = ?""",
@@ -312,10 +346,14 @@ class Tracker:
         ).fetchall()
 
         latest_msg_row = self._conn.execute(
-            "SELECT message FROM occurrences WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1",
+            "SELECT message, log_message FROM occurrences "
+            "WHERE group_id = ? ORDER BY timestamp DESC LIMIT 1",
             (group_id,)
         ).fetchone()
         latest_message = latest_msg_row['message'] if latest_msg_row is not None else None
+        latest_log_message = (
+            latest_msg_row['log_message'] if latest_msg_row is not None else None
+        )
 
         return GroupDetails(
             fingerprint=row['fingerprint'],
@@ -331,7 +369,12 @@ class Tracker:
             servers_affected=[r['server'] for r in server_rows],
             server_counts_24h=self._get_server_counts(group_id, cutoff_24h),
             hourly_timeline=[(_ts_to_dt(r['hour']), r['count']) for r in timeline_rows],
+            level=row['level'],
+            thread=row['thread'],
+            log_message_template=row['log_message_template'],
+            cause_chain=_causes_from_json(row['cause_chain']),
             latest_message=latest_message,
+            latest_log_message=latest_log_message,
             muted_by=row['muted_by'],
             muted_at=_ts_to_dt(row['muted_at']) if row['muted_at'] is not None else None,
             resolved_by=row['resolved_by'],
@@ -437,7 +480,7 @@ class Tracker:
     ) -> tuple[str, list[Any]]:
         """Build the WHERE clause + bound params shared by list_groups and count_groups.
 
-        window_hours, sort, limit and offset are NOT filters and must never appear here —
+        window_hours, sort, limit and offset are NOT filters and must never appear here;
         divergence between this and the row count would make `total` disagree with `groups`.
         """
         clauses: list[str] = []
@@ -503,11 +546,11 @@ class Tracker:
         limit: int = 50,
         offset: int = 0,
     ) -> list[GroupSummary]:
-        """"Everything, with filters" — backs GET /api/groups.
+        """"Everything, with filters"; backs GET /api/groups.
 
         `server` matches if the server appears anywhere in the group's occurrences,
         regardless of window_hours (deliberately different from get_groups_for_server,
-        which requires status='active' and restricts to the window — that method is
+        which requires status='active' and restricts to the window; that method is
         unchanged and continues to back only the /server slash command).
 
         `status` accepts 'active' | 'muted' | 'resolved' | 'all' | None; the last two
@@ -521,7 +564,7 @@ class Tracker:
         Raises ValueError for an unknown `status` or `sort`. Out-of-range integers are
         clamped rather than rejected: limit is hard-capped at 500, offset/window_hours/
         new_within_hours are clamped to non-negative and no larger than the retention
-        window (expiry_days * 24 hours) — beyond that there is nothing to find.
+        window (expiry_days * 24 hours); beyond that there is nothing to find.
         """
         if status is not None and status not in _VALID_STATUSES:
             raise ValueError(f"invalid status: {status!r}")
@@ -603,20 +646,20 @@ class Tracker:
             return []
         limit = _clamp_int(limit, 0, _LIST_GROUPS_MAX_LIMIT)
         rows = self._conn.execute(
-            "SELECT timestamp, server, message FROM occurrences WHERE group_id = ? "
-            "ORDER BY timestamp DESC LIMIT ?",
+            "SELECT timestamp, server, message, log_message FROM occurrences "
+            "WHERE group_id = ? ORDER BY timestamp DESC LIMIT ?",
             (group_row['id'], limit)
         ).fetchall()
         return [
             OccurrenceSummary(timestamp=_ts_to_dt(row['timestamp']), server=row['server'],
-                               message=row['message'])
+                               message=row['message'], log_message=row['log_message'])
             for row in rows
         ]
 
     def get_distinct_servers(self) -> list[str]:
         """Return every server that has ever contributed an occurrence, sorted.
 
-        Reads the same `occurrences` table list_groups' `server` filter reads (§6.1) —
+        Reads the same `occurrences` table list_groups' `server` filter reads (§6.1);
         must stay in sync so a server listed here always matches at least one group in
         list_groups(server=...).
         """
@@ -678,7 +721,7 @@ class Tracker:
         return cur.rowcount > 0
 
     def resolve_group(self, fingerprint: str, actor: str = "unknown") -> bool:
-        """Mark a group resolved. Ingest will not reactivate it — the group
+        """Mark a group resolved. Ingest will not reactivate it; the group
         accumulates counts silently and ages out via expiry once errors stop arriving.
         """
         now = int(time.time())
@@ -755,7 +798,7 @@ class Tracker:
 
         Returns (raw_token, expires_at_epoch_s). Only the token's SHA-256 hash is
         ever persisted; the raw value is returned once here and cannot be recovered
-        later — losing it means minting a new one.
+        later, so losing it means minting a new one.
 
         Raises ValueError if the user already has 20 tokens. Expired-but-not-yet-swept
         rows count against the cap too (the hourly expiry pass hasn't reclaimed them
@@ -763,7 +806,7 @@ class Tracker:
         """
         if db.count_api_tokens(self._conn, discord_id) >= 20:
             raise ValueError(
-                "Maximum of 20 API tokens per user — revoke old ones with /api-token revoke"
+                "Maximum of 20 API tokens per user, revoke old ones with /api-token revoke"
             )
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -945,8 +988,8 @@ class Tracker:
 
         Delegates to db.run_expiry() with a caller-supplied retention window instead of
         the configured expiry_days. This also sweeps any API tokens past their own
-        expires_at, same as the regular hourly expiry pass, but — since that sweep is
-        keyed on wall-clock time, not `days` — never sweeps a token early.
+        expires_at, same as the regular hourly expiry pass. Since that sweep is
+        keyed on wall-clock time, not `days`, it never sweeps a token early.
 
         Returns (groups_deleted, discord_message_ids). The caller is responsible
         for deleting the Discord messages.

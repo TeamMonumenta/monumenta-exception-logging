@@ -20,13 +20,13 @@ _APP_PACKAGES = ['com.playmonumenta']
 # Real messages from production logs
 # ---------------------------------------------------------------------------
 
-# From ring_latest.log — Java 17+ "helpful NPE" with class names in double quotes.
+# From ring_latest.log: Java 17+ "helpful NPE" with class names in double quotes.
 _NPE_HELPFUL_MSG = (
     'Cannot invoke "org.bukkit.entity.Allay.teleport(org.bukkit.Location)"'
     ' because "this.this$0.mBoss" is null'
 )
 
-# From forum_latest.log — boss loading error with a long tag list containing
+# From forum_latest.log: boss loading error with a long tag list containing
 # nested brackets, single-quoted entity name, and numeric parameters.
 _BOSS_ENTITY_MSG = (
     "boss_generictarget only works on mobs! Entity name='Lunar Omen',"
@@ -40,7 +40,7 @@ _BOSS_ENTITY_MSG = (
 # Real frame lists from production logs
 # ---------------------------------------------------------------------------
 
-# ring_latest.log — IllegalStateException: Asynchronous play sound!
+# ring_latest.log: IllegalStateException: Asynchronous play sound!
 # com.playmonumenta frames appear at index 3 onward (after 3 spigot frames).
 _ASYNC_SOUND_FRAMES = [
     {'class_name': 'org.spigotmc.AsyncCatcher', 'method': 'catchOp'},
@@ -64,7 +64,7 @@ _ASYNC_SOUND_FRAMES = [
     {'class_name': 'java.lang.Thread', 'method': 'run'},
 ]
 
-# isles_latest.log — ConcurrentModificationException from TABIntegration.
+# isles_latest.log: ConcurrentModificationException from TABIntegration.
 # Only the com.playmonumenta frames are in _APP_PACKAGES; TAB and JDK frames are not.
 _CME_TAB_FRAMES = [
     {'class_name': 'java.util.WeakHashMap$HashIterator', 'method': 'nextEntry'},
@@ -115,7 +115,7 @@ class TestNormalizeMessage:
         assert '192.168.1.100' not in result
 
     def test_long_number_replaced(self):
-        # Task IDs, entity IDs, etc. — 4+ digit numbers common in error messages.
+        # Task IDs, entity IDs, etc.: 4+ digit numbers common in error messages.
         msg = 'Task #2748835 for Plugin generated an exception'
         result = normalize_message(msg)
         assert '<N>' in result
@@ -154,7 +154,7 @@ class TestNormalizeMessage:
         assert 'boss_projectile' not in result
 
     def test_no_change_to_plain_message(self):
-        # Message with none of the trigger patterns — should be unchanged.
+        # Message with none of the trigger patterns, should be unchanged.
         msg = 'Tried to find the union of an empty list of hitboxes!'
         assert normalize_message(msg) == msg
 
@@ -188,7 +188,7 @@ class TestNormalizeMessage:
         assert '3601df3d96f54dc1b10b8a4ebcefd210' not in result
 
     def test_bare_uuid_requires_word_boundary(self):
-        # 33-char hex — _BARE_UUID_RE must not fire (no word boundary after char 32).
+        # 33-char hex: _BARE_UUID_RE must not fire (no word boundary after char 32).
         # The whole 33-char token is caught by _LONG_TOKEN_RE instead.
         msg = 'token=3601df3d96f54dc1b10b8a4ebcefd210x end'
         result = normalize_message(msg)
@@ -203,7 +203,7 @@ class TestNormalizeMessage:
         assert token not in result
 
     def test_short_alphanumeric_digit_portion_replaced(self):
-        # 20-char token — under the 32-char threshold for <id>, but the numeric
+        # 20-char token: under the 32-char threshold for <id>, but the numeric
         # portion is still replaced by the all-numbers rule.
         msg = 'error code ABC12345678901234567890 end'
         result = normalize_message(msg)
@@ -219,7 +219,7 @@ class TestNormalizeMessage:
         assert normalize_message(msg1) == normalize_message(msg2)
 
     def test_plugin_version_replaced(self):
-        # git describe version — the hex hash must not survive as digits, or two
+        # git describe version: the hex hash must not survive as digits, or two
         # builds of the same bug would fingerprint differently.
         msg = 'Plugin MonumentaPlugins v11.80.2-1-gf114425-SNAPSHOT failed to enable'
         result = normalize_message(msg)
@@ -233,7 +233,7 @@ class TestNormalizeMessage:
         assert normalize_message('built against 1.20.4-SNAPSHOT') == 'built against <version>'
 
     def test_plain_dotted_number_is_not_a_version(self):
-        # No git-describe/-SNAPSHOT suffix — falls through to the number rule.
+        # No git-describe/-SNAPSHOT suffix, falls through to the number rule.
         assert normalize_message('Error at 1.20.4 with coords 12.5') == \
             'Error at <N> with coords <N>'
 
@@ -289,7 +289,7 @@ class TestNormalizeMessage:
         assert normalize_message(msg1) == normalize_message(msg2)
 
     def test_location_block_nested_braces_handled(self):
-        # The Location block contains a nested brace (CraftWorld{name=...}) — must not truncate early.
+        # The Location block contains a nested brace (CraftWorld{name=...}); must not truncate early.
         msg = 'err Location{world=CraftWorld{name=foo},x=1.0,y=2.0} done'
         result = normalize_message(msg)
         assert 'Location{<location>}' in result
@@ -297,7 +297,7 @@ class TestNormalizeMessage:
         assert 'done' in result
 
     def test_contraction_apostrophe_not_treated_as_quote(self):
-        # "Can't" — the apostrophe after 'n' is a contraction, not a quote delimiter.
+        # "Can't": the apostrophe after 'n' is a contraction, not a quote delimiter.
         # It must not consume text up to the next single-quote.
         msg = "Can't unload world 'plot6771' because there are still players in it (HackJoinWorldFix check)"
         result = normalize_message(msg)

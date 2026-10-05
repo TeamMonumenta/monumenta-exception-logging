@@ -185,7 +185,7 @@ def _parse_pull_request_event(
     # flows through the same auto-post path as a later label add. GitHub fires
     # 'opened' (not 'labeled') for that case.
     if action in ("labeled", "unlabeled", "opened"):
-        # The payload carries the full current label set — recompute from scratch.
+        # The payload carries the full current label set; recompute from scratch.
         label_names = [
             str(lab.get("name", "")) for lab in pr.get("labels", []) if lab.get("name")
         ]
@@ -223,7 +223,7 @@ def _parse_check_suite_event(payload: dict[str, Any]) -> Optional[CheckEvent]:
         if pr.get("number")
     ]
     if not pr_numbers:
-        return None  # branch push / fork PR with no associated PR — nothing to track
+        return None  # branch push / fork PR with no associated PR, nothing to track
     conclusion = str(suite.get("conclusion", "")).lower()
     return CheckEvent(
         repo=str(payload.get("repository", {}).get("full_name", "")).lower(),
@@ -308,7 +308,7 @@ class GitHubClient:
         merged_by, closed_by, pr_author, labels (raw names), checks_failing.
 
         checks_failing is True/False, or None when the check status could not be
-        read (see _fetch_checks_failing_for_sha) — callers must treat None as
+        read (see _fetch_checks_failing_for_sha). Callers must treat None as
         "leave the existing check state alone".
         """
         async with aiohttp.ClientSession(headers=self._headers) as session:
@@ -364,7 +364,7 @@ class GitHubClient:
 
         Returns True if any has failed, False if none are failing, or None if the
         status could not be determined. Reading the Checks API needs a classic
-        PAT or a GitHub App token — a fine-grained PAT cannot be granted it
+        PAT or a GitHub App token; a fine-grained PAT cannot be granted it
         (GitHub disabled the `Checks` permission for fine-grained tokens), so the
         request comes back 403. On any such failure we return None so callers
         leave the existing check state (set by the check_suite webhook) untouched
@@ -378,7 +378,7 @@ class GitHubClient:
         except aiohttp.ClientResponseError as exc:
             if exc.status in (403, 404):
                 logger.warning(
-                    "GitHub %s @ %s: cannot read check-runs (HTTP %d) — the token "
+                    "GitHub %s @ %s: cannot read check-runs (HTTP %d); the token "
                     "lacks Checks read access (fine-grained PATs can't be granted "
                     "it); leaving check state unchanged",
                     repo, head_sha[:8], exc.status,

@@ -12,7 +12,7 @@ class TrackerConfig:
     fingerprint_frame_count: int = 3
     expiry_days: int = 14
     verbose: bool = True
-    # Chisel integration — disabled when chisel_public_url is None
+    # Chisel integration; disabled when chisel_public_url is None
     chisel_public_url: Optional[str] = None
     chisel_fix_prompt_path: str = "fix_exception_prompt.md"
     # Discord user IDs allowed to trigger Chisel fix requests. Empty list = no restriction.

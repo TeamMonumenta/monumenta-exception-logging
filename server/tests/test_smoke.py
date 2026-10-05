@@ -173,7 +173,7 @@ def test_get_groups_for_server(fresh_api):
 def test_get_new_groups(fresh_api):
     fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
     fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))
-    # Both events have current timestamps — they appear as new groups
+    # Both events have current timestamps, so they appear as new groups
     results = fresh_api.get_new_groups(hours=24)
     assert len(results) == 2
     # A second ingest of the same event must not create a duplicate group

@@ -132,10 +132,12 @@ def test_details_to_json_frame_shape():
     d = _make_details()
     data = _details_to_json(d)
     assert data['canonical_frames'] == [
-        {'class_name': 'com.example.Foo', 'method': 'bar', 'file': 'Foo.java', 'line': 1}
+        {'class_name': 'com.example.Foo', 'method': 'bar', 'file': 'Foo.java',
+         'line': 1, 'location': None}
     ]
     assert data['canonical_trace'][1] == {
-        'class_name': 'com.example.Baz', 'method': 'qux', 'file': None, 'line': -1
+        'class_name': 'com.example.Baz', 'method': 'qux', 'file': None,
+        'line': -1, 'location': None
     }
 
 
@@ -168,7 +170,8 @@ def test_occurrence_to_json():
     now = datetime(2024, 1, 1, tzinfo=timezone.utc)
     o = OccurrenceSummary(timestamp=now, server="build", message="boom")
     data = _occurrence_to_json(o)
-    assert data == {'timestamp': int(now.timestamp()), 'server': 'build', 'message': 'boom'}
+    assert data == {'timestamp': int(now.timestamp()), 'server': 'build',
+                    'message': 'boom', 'log_message': ''}
 
 
 def test_fix_attempt_to_json_pending():
@@ -621,7 +624,7 @@ def test_mute_accepts_any_case_of_the_bearer_scheme(scheme):
 
 def test_mute_tolerates_extra_whitespace_after_the_scheme():
     """A stray extra space between 'Bearer' and the token must not be treated as
-    part of the token — that would blame the token for a spacing quirk."""
+    part of the token; that would blame the token for a spacing quirk."""
     async def _inner():
         tracker = Tracker(TrackerConfig(db_path=':memory:'))
         fp1, _ = tracker.ingest_event(parse_event(EXAMPLE_EVENT))
@@ -695,7 +698,7 @@ def test_mute_works_with_discord_entirely_disabled():
 
 
 # ===========================================================================
-# POST /api/groups/<id>/fix — status-code precedence
+# POST /api/groups/<id>/fix: status-code precedence
 # ===========================================================================
 
 @pytest.fixture
@@ -760,7 +763,7 @@ def test_fix_not_in_allowed_users_403(prompt_path):
 
 def test_fix_in_allowed_users_200(prompt_path):
     """The allow-list must be checked against the token's verified discord_id, not
-    against anything else — this is the positive case for test_fix_not_in_allowed_users_403
+    against anything else. This is the positive case for test_fix_not_in_allowed_users_403
     above, proving a match (not just a mismatch) is actually recognized."""
     async def _inner():
         tracker = Tracker(TrackerConfig(db_path=':memory:'))
@@ -896,7 +899,7 @@ def test_fix_rejected_does_not_dispatch_working_reaction(prompt_path):
 # ===========================================================================
 
 def test_get_group_by_uppercase_full_fingerprint():
-    """Uppercase must work for the full fingerprint too, not just the short ID —
+    """Uppercase must work for the full fingerprint too, not just the short ID;
     otherwise an ID pasted from a log 404s in one form and resolves in the other."""
     async def _inner():
         tracker = Tracker(TrackerConfig(db_path=':memory:'))
@@ -990,3 +993,44 @@ def test_no_purge_route():
             resp = await client.post('/api/purge', headers=_bearer(tracker))
             assert resp.status_code == 404
     _run(_inner())
+
+
+# ---------------------------------------------------------------------------
+# Log-event context in the group-details JSON
+# ---------------------------------------------------------------------------
+
+def test_details_to_json_log_context_defaults():
+    """A group carrying no log context still emits every documented key."""
+    data = _details_to_json(_make_details())
+    assert data['level'] == ''
+    assert data['log_message_template'] == ''
+    assert data['cause_chain'] == []
+    assert data['latest_log_message'] is None
+
+
+def test_details_to_json_cause_chain():
+    from tracker.api import CauseSummary
+    inner = FrameSummary(class_name="com.example.Deep", method="run", file="Deep.java", line=7)
+    d = _make_details(
+        level='WARN',
+        log_message_template='Task #<N> for Monumenta generated an exception',
+        latest_log_message='Task #42 for Monumenta generated an exception',
+        cause_chain=[
+            CauseSummary(class_name='java.lang.IllegalArgumentException',
+                         message='World unloaded', frames=[inner]),
+            CauseSummary(class_name='java.lang.NullPointerException', message='', frames=[]),
+        ],
+    )
+    data = _details_to_json(d)
+    assert data['level'] == 'WARN'
+    assert data['log_message_template'] == 'Task #<N> for Monumenta generated an exception'
+    assert data['latest_log_message'] == 'Task #42 for Monumenta generated an exception'
+    assert data['cause_chain'] == [
+        {
+            'class_name': 'java.lang.IllegalArgumentException',
+            'message': 'World unloaded',
+            'frames': [{'class_name': 'com.example.Deep', 'method': 'run',
+                        'file': 'Deep.java', 'line': 7, 'location': None}],
+        },
+        {'class_name': 'java.lang.NullPointerException', 'message': '', 'frames': []},
+    ]

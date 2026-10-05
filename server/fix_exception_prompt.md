@@ -5,3 +5,6 @@ Fix the exception below. It has been observed {count} times on server(s): {serve
 
 **Stack trace:**
 {stacktrace}
+
+**Caused by:**
+{cause_chain}

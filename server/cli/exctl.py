@@ -197,7 +197,13 @@ def fmt_list_footer(shown: int, total: int, offset: Any = 0) -> str:
 
 
 def fmt_occurrence_line(o: dict[str, Any]) -> str:
-    return f"{fmt_timestamp(o['timestamp'])}  {o['server']}  {o['message']}"
+    line = f"{fmt_timestamp(o['timestamp'])}  {o['server']}  {o['message']}"
+    # Only when it adds something: a wrapper like ServerSchedulerException repeats
+    # its exception message verbatim as the log message.
+    log_message = o.get('log_message')
+    if log_message and log_message != o['message']:
+        line += f"  [{log_message}]"
+    return line
 
 
 def fmt_frame_line(frame: dict[str, Any]) -> str:
@@ -214,16 +220,24 @@ def fmt_details(d: dict[str, Any]) -> str:
         f"Last seen: {fmt_timestamp(d['last_seen'])}",
         f"Total count: {d['total_count']}",
         f"Servers: {', '.join(sorted(d['servers_affected'])) or 'none'}",
-        f"Logger: {d['logger']}",
+        f"Logger: {d['logger']}" + (f" [{d['level']}]" if d.get('level') else ""),
     ]
     if d.get('latest_message'):
         lines.append(f"Latest message: {d['latest_message']}")
+    if d.get('latest_log_message'):
+        lines.append(f"Logged as: {d['latest_log_message']}")
     if d['status'] == 'muted' and d.get('muted_by'):
         lines.append(f"Muted by {d['muted_by']} on {fmt_timestamp(d['muted_at'])}")
     if d['status'] == 'resolved' and d.get('resolved_by'):
         lines.append(f"Resolved by {d['resolved_by']} on {fmt_timestamp(d['resolved_at'])}")
     lines.append("Stack trace:")
     lines.extend(fmt_frame_line(f) for f in d['canonical_trace'])
+    causes: list[dict[str, Any]] = d.get('cause_chain') or []
+    for cause in causes:
+        detail = f": {cause['message']}" if cause['message'] else ""
+        lines.append(f"Caused by: {cause['class_name']}{detail}")
+        frames: list[dict[str, Any]] = cause['frames']
+        lines.extend(fmt_frame_line(f) for f in frames)
     return "\n".join(lines)
 
 

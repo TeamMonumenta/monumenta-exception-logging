@@ -311,7 +311,7 @@ def test_format_message_resolved_has_strikethrough():
 
 
 def test_format_message_truncation_stays_under_limit():
-    # 200 frames — must truncate to stay under 2000
+    # 200 frames: must truncate to stay under 2000
     details = _make_details(trace_count=200)
     msg = format_exception_message(details)
     assert len(msg) <= 2000
@@ -415,7 +415,7 @@ def test_repeat_ingest_sets_has_activity(fresh_api):
 def test_get_active_discord_messages_requires_activity_flag(fresh_api):
     fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
     fresh_api.set_discord_message_id(fp, "msg-1")
-    # No repeat ingest yet — has_activity is still 0
+    # No repeat ingest yet, has_activity is still 0
     assert fresh_api.get_active_discord_messages() == []
 
 

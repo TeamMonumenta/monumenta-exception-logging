@@ -25,9 +25,21 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             fingerprint        TEXT NOT NULL UNIQUE,
             exception_class    TEXT NOT NULL,
             message_template   TEXT NOT NULL,
-            canonical_frames   TEXT NOT NULL,
-            canonical_trace    TEXT NOT NULL,
+            canonical_frames   TEXT NOT NULL,   -- hashed app frames, most recent occurrence
+            canonical_trace    TEXT NOT NULL,   -- full trace, most recent occurrence
+            -- Descriptive columns below refresh on every occurrence, so they
+            -- describe the most recent one. None is a fingerprint input, so
+            -- rewriting them cannot split or merge a group. See SCHEMA.md.
             logger             TEXT NOT NULL,
+            level              TEXT NOT NULL DEFAULT '',
+            thread             TEXT NOT NULL DEFAULT '',
+            log_message_template TEXT NOT NULL DEFAULT '',
+            cause_chain        TEXT NOT NULL DEFAULT '[]',
+            -- The exact inputs that produced `fingerprint`, as JSON. Invariant
+            -- across a group by construction, so written once on insert. Lets a
+            -- regroup recompute from what was hashed rather than re-normalizing
+            -- an already-normalized message_template.
+            signature          TEXT NOT NULL DEFAULT '',
             first_seen         INTEGER NOT NULL,
             last_seen          INTEGER NOT NULL,
             total_count        INTEGER NOT NULL DEFAULT 0,
@@ -53,7 +65,17 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             group_id   INTEGER NOT NULL REFERENCES error_groups(id) ON DELETE CASCADE,
             server     TEXT NOT NULL,
             timestamp  INTEGER NOT NULL,
-            message    TEXT NOT NULL
+            message    TEXT NOT NULL,
+            -- Per-occurrence, not just per-group: this is where per-event context
+            -- lives, e.g. the task id in Paper's "Task #N ... generated an exception".
+            log_message TEXT NOT NULL DEFAULT '',
+            -- zlib-compressed original ingest payload. NULL past RAW_EVENT_CAP
+            -- occurrences for the same group, server and hour, or when the payload
+            -- exceeds RAW_EVENT_MAX_BYTES compressed. This is what makes a future
+            -- regrouping a rebuild rather than a wipe: it is the only per-occurrence
+            -- record of the fingerprint inputs, and therefore the only way to split
+            -- a group. See SCHEMA.md.
+            raw_event   BLOB
         );
 
         CREATE INDEX IF NOT EXISTS idx_occurrences_group_timestamp
@@ -130,15 +152,44 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+# Columns added after the initial schema. Each is also declared in _create_tables,
+# so this list only matters for a database created before the column existed.
+# Every entry must carry a DEFAULT, since existing rows are not rewritten here.
+_ADDED_COLUMNS = (
+    ("error_groups", "has_activity INTEGER NOT NULL DEFAULT 0"),
+    ("error_groups", "level TEXT NOT NULL DEFAULT ''"),
+    ("error_groups", "thread TEXT NOT NULL DEFAULT ''"),
+    ("error_groups", "log_message_template TEXT NOT NULL DEFAULT ''"),
+    ("error_groups", "cause_chain TEXT NOT NULL DEFAULT '[]'"),
+    ("error_groups", "signature TEXT NOT NULL DEFAULT ''"),
+    ("occurrences", "log_message TEXT NOT NULL DEFAULT ''"),
+    ("occurrences", "raw_event BLOB"),
+)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Apply incremental schema changes to existing databases."""
-    try:
-        conn.execute(
-            "ALTER TABLE error_groups ADD COLUMN has_activity INTEGER NOT NULL DEFAULT 0"
-        )
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # Column already exists (fresh DB or previously migrated)
+    """Apply incremental schema changes to existing databases.
+
+    ALTER TABLE cannot take bound parameters, so the names are interpolated; they
+    come from _ADDED_COLUMNS, never from request input.
+    """
+    tables = {table for table, _ in _ADDED_COLUMNS}
+    existing = {
+        table: {row['name'] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for table in tables
+    }
+    for table, column_def in _ADDED_COLUMNS:
+        if column_def.split()[0] in existing[table]:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            # Another process opening the same database can add the column between
+            # the PRAGMA above and this ALTER. Only that race is benign - anything
+            # else (a locked database, say) must surface.
+            if 'duplicate column name' not in str(e):
+                raise
 
 def set_discord_message_id(
     conn: sqlite3.Connection, fingerprint: str, message_id: Optional[str]
@@ -257,10 +308,11 @@ def migrate_fingerprints(
     from .fingerprint import (  # pylint: disable=import-outside-toplevel
         compute_fingerprint, normalize_message, extract_app_frames,
     )
+    from .ingest import build_signature  # pylint: disable=import-outside-toplevel
 
     rows = conn.execute(
-        "SELECT id, fingerprint, exception_class, message_template, "
-        "canonical_frames, discord_message_id, total_count, first_seen, last_seen "
+        "SELECT id, fingerprint, exception_class, message_template, signature, "
+        "canonical_trace, discord_message_id, total_count, first_seen, last_seen "
         "FROM error_groups"
     ).fetchall()
 
@@ -270,12 +322,42 @@ def migrate_fingerprints(
 
     with conn:
         for row in rows:
-            frames = json.loads(row['canonical_frames'])
-            new_normalized = normalize_message(row['message_template'])
+            # Re-derive from what ingest itself consumes: the full trace, and the
+            # raw message from an occurrence. Recomputing from canonical_frames
+            # would feed already-filtered frames back through extract_app_frames,
+            # whose no-app-frame fallback then returns the wrong frames silently
+            # rather than failing. Recomputing from message_template would
+            # re-normalize an already-normalized value, which is not a no-op:
+            # nested bracket data loses one nesting level per pass.
+            frames = json.loads(row['canonical_trace'])
+            # id breaks the tie: timestamps are client-supplied and second-granular,
+            # so ties are normal, and without it which message defines the group is
+            # arbitrary and can differ between two runs over the same data.
+            raw_row = conn.execute(
+                "SELECT message FROM occurrences WHERE group_id = ? "
+                "ORDER BY timestamp DESC, id DESC LIMIT 1",
+                (row['id'],)
+            ).fetchone()
+            # A group whose occurrences have all aged out has no raw message left;
+            # its stored template is the best available input.
+            raw_message = raw_row['message'] if raw_row is not None else row['message_template']
+
+            new_normalized = normalize_message(raw_message)
             top_frames = extract_app_frames(frames, app_packages, 3)
             new_fp = compute_fingerprint(row['exception_class'], new_normalized, top_frames)
+            new_signature = build_signature(
+                row['exception_class'], new_normalized, top_frames)
 
             if new_fp == row['fingerprint']:
+                # Unchanged identity, but the stored inputs may predate the column.
+                # Writing them here is what populates signature for groups that were
+                # inserted before it existed; nothing else can, since ingest only
+                # writes it on insert.
+                if row['signature'] != new_signature:
+                    conn.execute(
+                        "UPDATE error_groups SET signature = ? WHERE id = ?",
+                        (new_signature, row['id'])
+                    )
                 continue
 
             winner = conn.execute(
@@ -286,9 +368,9 @@ def migrate_fingerprints(
 
             if winner is None:
                 conn.execute(
-                    "UPDATE error_groups SET fingerprint = ?, message_template = ?, has_activity = 1 "
-                    "WHERE id = ?",
-                    (new_fp, new_normalized, row['id'])
+                    "UPDATE error_groups SET fingerprint = ?, message_template = ?, "
+                    "signature = ?, has_activity = 1 WHERE id = ?",
+                    (new_fp, new_normalized, new_signature, row['id'])
                 )
                 conn.execute(
                     "UPDATE fix_attempts SET fingerprint = ? WHERE fingerprint = ?",
@@ -324,7 +406,7 @@ def migrate_fingerprints(
                 )
                 if row['discord_message_id'] is not None:
                     if winner['discord_message_id'] is None:
-                        # Winner has no Discord message — adopt the loser's instead of deleting it.
+                        # Winner has no Discord message, so adopt the loser's instead of deleting it.
                         conn.execute(
                             "UPDATE error_groups SET discord_message_id = ? WHERE id = ?",
                             (row['discord_message_id'], winner['id'])
@@ -554,7 +636,7 @@ def count_api_tokens(conn: sqlite3.Connection, discord_id: str) -> int:
 def get_api_token(conn: sqlite3.Connection, token_hash: str) -> Optional[sqlite3.Row]:
     """Return the (discord_id, expires_at) row for a token hash, or None if unknown.
 
-    Does not check expiry — an expired-but-not-yet-swept row is still returned so
+    Does not check expiry; an expired-but-not-yet-swept row is still returned so
     callers can distinguish "expired" from "never existed" if they need to.
     """
     return conn.execute(

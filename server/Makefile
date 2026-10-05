@@ -6,7 +6,7 @@ PIP    := $(VENV)/bin/pip
 .DEFAULT_GOAL := help
 
 # Create .venv and install all dependencies.
-# Make tracks changes to requirements files — re-runs pip if they change.
+# Make tracks changes to requirements files and re-runs pip if they change.
 $(VENV)/bin/activate: requirements.txt requirements-dev.txt
 	python3 -m venv $(VENV)
 	$(PIP) install --upgrade pip

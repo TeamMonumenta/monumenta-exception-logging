@@ -1,17 +1,34 @@
 # Exception Reporting Protocol
 
-This document defines the JSON message format sent from the Minecraft plugin to the Python ingest server.
+This document defines the JSON message format sent to the Python ingest server's
+`POST /ingest` endpoint. The Java plugin is the main producer and the heap-logger service
+is a second one (see "Synthetic exceptions from heap-logger" below); the server treats
+any sender that can reach the endpoint and POST this shape the same way.
 
 ## Transport
 
-- **Method:** `HTTP POST`
-- **Endpoint:** Configured via `EXCEPTLOG_INGEST_URL` environment variable on the server (e.g. `http://exception-tracker.internal/ingest`)
-- **Content-Type:** `application/json`
-- **Authentication:** None. The ingest server listens on plain HTTP with no auth. Security is provided entirely by the Kubernetes network boundary - the service is not exposed outside the cluster. This avoids per-request TLS/crypto overhead and removes secret management from the plugin.
-- **Fire-and-forget:** The plugin does not retry on failure and does not block the server thread. Failures are silently dropped after logging a single warning.
-- **Batching:** Single events per POST. No batching in v1.
+- **Method:** `HTTP POST`, `Content-Type: application/json`, one event per request.
+  There is no batching.
+- **Endpoint:** the full URL of the server's `/ingest` route, read from the
+  `EXCEPTLOG_INGEST_URL` environment variable of the Minecraft server process the plugin
+  runs in (e.g. `http://exception-tracker.internal/ingest`). If it is unset or not a
+  valid URI, the plugin logs a warning and reports nothing.
+- **Responses:** `204 No Content` on success. A body that fails validation against the
+  schema below gets `400` with `{"error": [...]}` listing the validation errors; a body
+  that is not JSON at all gets a plain `400`. The plugin logs a warning for any status
+  other than 204 and drops the event.
+- **Authentication:** none. The ingest server listens on plain HTTP with no auth.
+  Security is provided entirely by the Kubernetes network boundary - the service is not
+  exposed outside the cluster. This avoids per-request TLS/crypto overhead and removes
+  secret management from the plugin. Because the endpoint is unauthenticated, the server
+  enforces its own bounds on what it stores rather than trusting the sender (see
+  "Server-side limits" below).
+- **Fire-and-forget:** the plugin POSTs from a single daemon thread, never from the
+  server thread, and does not retry. A failed send logs one warning and the event is gone.
+- **Rate limit:** at most 20 events per second per server process. The counter resets
+  every second; events over the limit are dropped silently.
 
-## Message Schema
+## Message schema
 
 ```json
 {
@@ -39,76 +56,107 @@ This document defines the JSON message format sent from the Minecraft plugin to 
 }
 ```
 
-### Top-Level Fields
+### Top-level fields
 
 | Field | Type | Description |
 |---|---|---|
-| `schema_version` | integer | Always `1` for this version. Used by the server to handle future format changes. |
-| `server_id` | string | Identifies the originating server. Read from `EXCEPTLOG_SERVER_NAME` env var at plugin startup. Falls back to hostname if env var is absent. |
-| `timestamp_ms` | integer | Unix timestamp in milliseconds (UTC) when the log event was emitted. From `LogEvent.getTimeMillis()`. |
-| `level` | string | Log level string. Will always be `"ERROR"` in practice since the plugin only captures ERROR-level events, but included for completeness. |
+| `schema_version` | integer | Always `1` for this version. Used by the server to handle future format changes. Not stored as a column; it survives inside `occurrences.raw_event`. |
+| `server_id` | string | Identifies the originating server. Read from `EXCEPTLOG_SERVER_NAME` at plugin startup; falls back to the hostname, and to `"unknown"` if that cannot be resolved. |
+| `timestamp_ms` | integer | Unix timestamp in milliseconds (UTC) when the log event was emitted, from `LogEvent.getTimeMillis()`. The server stores it in seconds, clamped to no more than 5 minutes ahead of its own clock (see `occurrences.timestamp` in SCHEMA.md). |
+| `level` | string | Log level of the originating event, e.g. `"WARN"` or `"ERROR"`. The plugin reports everything at or above `EXCEPTLOG_MIN_LEVEL` (default `INFO`) - see "Reporting threshold" in the README. |
 | `logger` | string | The Log4j2 logger name that emitted the event. Typically the fully-qualified plugin class name, e.g. `com.playmonumenta.plugins.Plugin`. |
-| `thread` | string | Name of the thread that logged the event, e.g. `"Server thread"`. From `LogEvent.getThreadName()`. |
-| `message` | string | The human-readable log message that accompanied the exception, e.g. `"Failed to load boss!"`. This is the message passed to `logger.error(...)`, not the exception message. May be empty string if no message was provided. |
-| `exception` | object | The captured exception. Always present (events without a throwable are filtered by the plugin before sending). |
+| `thread` | string | Name of the thread that logged the event, e.g. `"Server thread"`, from `LogEvent.getThreadName()`. It distinguishes a main-thread failure from an async one. |
+| `message` | string | The human-readable log message that accompanied the exception, e.g. `"Failed to load boss!"` - what was passed to `logger.error(...)`, not the exception's own message. May be an empty string. It often carries context the exception's message does not: Paper's scheduler puts the task id and owning plugin here. |
+| `exception` | object | The captured exception. Always present; events without a throwable are filtered out by the plugin before sending. |
 
-### `exception` Object
+### `exception` object
 
 | Field | Type | Description |
 |---|---|---|
 | `class_name` | string | Fully-qualified exception class name, e.g. `"java.lang.NullPointerException"` or `"com.playmonumenta.plugins.SomeCustomException"`. |
-| `message` | string \| null | The exception's own message (`e.getMessage()`). Null if no message was set. May contain variable content (player names, coordinates, etc.) - the server normalizes this for fingerprinting. |
-| `frames` | array | Ordered list of stack frames, from closest to throw site (index 0) to oldest caller. See Frame Object below. Includes all frames; the server filters for application frames during fingerprinting. |
-| `cause` | object \| null | The chained cause exception, if any (`e.getCause()`). Same structure as `exception`. Cause chains are captured up to a depth of 5 to prevent unbounded nesting. |
+| `message` | string \| null | The exception's own message (`e.getMessage()`). Null if no message was set. May contain variable content (player names, coordinates, etc.); the server normalizes it for fingerprinting. |
+| `frames` | array | Ordered list of stack frames, from closest to throw site (index 0) to oldest caller. Every frame of the throwable is sent; the server selects application frames from them when fingerprinting. |
+| `cause` | object \| null | The chained cause (`e.getCause()`), in the same shape, recursively. The plugin's depth budget is 5 including the outermost throwable, so a well-behaved payload carries at most 4 causes. |
 
-### Frame Object
+### Frame object
 
 | Field | Type | Description |
 |---|---|---|
 | `class_name` | string | Fully-qualified class name, e.g. `"com.playmonumenta.plugins.bosses.bosses.GenericTargetBoss"`. |
 | `method` | string | Method name, e.g. `"<init>"`, `"processEntity"`. |
 | `file` | string \| null | Source file name, e.g. `"GenericTargetBoss.java"`. Null when compiled without debug info. |
-| `line` | integer | Source line number. `-1` if unknown (e.g. native methods, or compiled without debug info). |
-| `location` | string \| null | JAR file or module the class was loaded from, e.g. `"Monumenta.jar"`, `"paper-1.20.4.jar"`. Derived from `StackTraceElement.toString()` - the portion in brackets. Null when not available (`"?"` in raw output is normalized to null). |
+| `line` | integer | Source line number. `-1` if unknown (native methods, or compiled without debug info). |
+| `location` | string \| null | JAR file or module the class was loaded from, e.g. `"Monumenta.jar"`, `"paper-1.20.4.jar"`. Derived from the bracketed suffix of `StackTraceElement.toString()`; null when unavailable (`"?"` in the raw output becomes null). Stored on every frame: it is what separates our own code from a third-party plugin's in an otherwise identical-looking trace. |
 
-## Plugin Implementation Notes
+### Server-side limits
 
-### Log4j2 Appender vs. JUL Handler
+`/ingest` is unauthenticated, so the sender's own budgets are a convention, not a
+guarantee. The server applies its own, in `tracker/ingest.py`:
 
-**Use a custom Log4j2 Appender attached programmatically at runtime.** This is preferred over a JUL handler because:
-- Log4j2 `LogEvent` is the primary logging event in Paper - JUL events are bridged to Log4j2, introducing extra overhead.
-- `LogEvent.getThrown()` gives direct Throwable access without going through JUL's `LogRecord`.
+| Limit | Value | Applies to |
+|---|---|---|
+| `MAX_CAUSE_DEPTH` | 4 | Causes stored in `error_groups.cause_chain`; deeper links are dropped. |
+| `MAX_CAUSE_FRAMES` | 200 | Frames per stored cause. The outermost exception's own `frames` are not truncated. |
+| `RAW_EVENT_CAP` / `RAW_EVENT_MAX_BYTES` | 50 per group/server/hour, 64 KiB each | Retention of the compressed payload in `occurrences.raw_event`. |
+
+Unknown fields are ignored by validation, and are therefore absent from the stored
+`raw_event` too - it holds the validated payload, not the received bytes.
+
+## Plugin implementation
+
+### Log4j2 appender, not a JUL handler
+
+The plugin attaches a custom Log4j2 `Appender` programmatically at runtime, rather than a
+JUL handler, because:
+
+- Log4j2 `LogEvent` is the primary logging event in Paper; JUL events are bridged into
+  Log4j2, so a JUL handler sees them later and with extra overhead.
+- `LogEvent.getThrown()` gives direct `Throwable` access without going through JUL's
+  `LogRecord`.
 - More precise filtering is possible at the Log4j2 level.
 
-**Appender attachment pattern:**
+### Appender attachment
+
+The appender is attached to the core root `Logger` directly, **not** via
+`LogManager.getContext(false)`. Called from a plugin classloader, that can return a
+*child* context, whose appenders never see server-level events.
+
 ```java
-LoggerContext context = (LoggerContext) LogManager.getContext(false);
-Configuration config = context.getConfiguration();
-ExceptionReporterAppender appender = new ExceptionReporterAppender(/* config */);
+ExceptionAppender appender = new ExceptionAppender(serverId, sender, minLevel);
 appender.start();
-config.addAppender(appender);
-config.getRootLogger().addAppender(appender, Level.ERROR, null);
-context.updateLoggers();
+((org.apache.logging.log4j.core.Logger) LogManager.getRootLogger()).addAppender(appender);
 ```
 
-Remove the appender on plugin disable:
+This overload registers the appender with **no level threshold** - it delegates to
+`LoggerConfig.addAppender(appender, null, null)` - so the appender receives everything
+reaching the root `LoggerConfig` and must filter by level itself. The
+`addAppender(appender, Level.ERROR, null)` overload is not usable here: it lives on
+`LoggerConfig`, reached through the context this pattern deliberately avoids.
+
+On plugin disable the appender is removed and stopped:
+
 ```java
-config.getRootLogger().removeAppender("ExceptionReporter");
+((org.apache.logging.log4j.core.Logger) LogManager.getRootLogger()).removeAppender(appender);
 appender.stop();
-context.updateLoggers();
 ```
 
-### Event Filtering
+### Event filtering
 
-The appender should skip events that:
-- Have no throwable (`logEvent.getThrown() == null`)
-- Are below ERROR level (enforced by the level filter on `addAppender`)
+`append()` skips events that:
 
-### HTTP Client
+- have no throwable (`logEvent.getThrown() == null`), or
+- are below `EXCEPTLOG_MIN_LEVEL` (default `INFO`).
 
-Use Java's built-in `java.net.http.HttpClient` (available since Java 11, which Paper 1.20.4 requires). No external HTTP library needed. The POST should be made on a separate thread (or virtual thread) to avoid blocking the server thread.
+Both checks happen before the rate-limit counter is incremented, so filtered events do not
+consume budget a reportable event in the same second needs.
 
-### Frame Extraction
+### HTTP client
+
+Java's built-in `java.net.http.HttpClient` (Java 11+, which Paper 1.20.4 requires) - no
+external HTTP library. Requests are submitted to a single-threaded daemon executor, so
+the server thread never blocks on a POST, and events are sent in the order they occurred.
+
+### Frame extraction
 
 ```java
 Throwable t = logEvent.getThrown();
@@ -120,14 +168,15 @@ for (StackTraceElement ste : elements) {
 }
 ```
 
-## Synthetic Exceptions from heap-logger
+## Synthetic exceptions from heap-logger
 
 The heap-logger microservice (`heap-logger/`) uses this same protocol to report memory
-leak patterns detected via heap dump analysis. It POSTs synthetic exceptions directly
-to the exception-logger's `POST /ingest` endpoint, bypassing the Java plugin entirely.
+leak patterns detected via heap dump analysis. It POSTs synthetic exceptions directly to
+the exception-logger's `POST /ingest`, bypassing the Java plugin entirely, so
+`EXCEPTLOG_MIN_LEVEL` and the plugin's rate limit do not apply to them.
 
-These synthetic events use fixed, stable field values so that the fingerprinting algorithm
-groups the same leak pattern consistently across servers and over time:
+The field values are fixed so that the same leak pattern fingerprints identically across
+servers and over time:
 
 | Field | Value |
 |---|---|
@@ -136,21 +185,21 @@ groups the same leak pattern consistently across servers and over time:
 | `thread` | `heap-worker` |
 | `message` | `Memory leak detected in heap dump` |
 | `exception.class_name` | `com.playmonumenta.memoryleak.MemoryLeakException` |
-| `exception.message` | `Leaked: <first class in retention chain> x <instance count>` |
-| `exception.frames` | One frame per step in the retention chain. `class_name` is the class at that step; `method` is the field name holding the reference, or `<ref>` if unknown. `file`, `line`, and `location` are always `null`, `-1`, and `null`. |
+| `exception.message` | `Leaked: <first class in retention chain> x <instance count>`, where the separator is a U+00D7 multiplication sign, not the letter `x` |
+| `exception.frames` | One frame per step in the retention chain. `class_name` is the class at that step; `method` is the field name holding the reference, or `<ref>` if unknown. `file`, `line` and `location` are always `null`, `-1` and `null`. |
 | `exception.cause` | Always `null` |
 
-The `exception.message` field is the fingerprint key. The first class name in the
-retention chain is the leaked object type (e.g. `org/bukkit/craftbukkit/.../CraftPlayer`);
-using it verbatim ensures that the same leak on different servers produces the same
-fingerprint and is merged into one exception group.
+What makes these group usefully is that the leaked object type appears verbatim as the
+first class name in `exception.message` and as the first retention-chain frame, while the
+instance count normalizes to `<N>` - so the same leak reported from two servers with
+different counts lands in one group. The hashed frames are the first three chain entries
+that match `APP_PACKAGES`, or, for a chain of purely third-party classes, the first three
+entries via `extract_app_frames`'s fallback.
 
-One POST is sent per leak pattern. A single heap dump analysis may produce multiple
+One POST is sent per leak pattern. A single heap dump analysis may produce several
 patterns, each reported as a separate ingest event.
 
-## Concrete Example
-
-Based on the real exception from the project specification:
+## Concrete example
 
 ```json
 {
@@ -205,3 +254,8 @@ Based on the real exception from the project specification:
   }
 }
 ```
+
+The first three frames are in `com.playmonumenta`, so those are the ones the
+fingerprint hashes, and the quoted entity name normalizes away before hashing. See
+[SCHEMA.md](SCHEMA.md) for how the event is fingerprinted and stored, and
+[README.md](README.md) for the plugin's configuration.

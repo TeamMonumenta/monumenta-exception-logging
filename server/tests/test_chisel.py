@@ -432,7 +432,7 @@ def _backdate_queued_at(api: Tracker, job_id: str, seconds_ago: int) -> None:
 
 def test_timeout_returns_empty_when_no_stale(api, fp):
     api.queue_fix_attempt(fp, "fix me")
-    # Not backdated — should be fresh
+    # Not backdated, should be fresh
     assert api.timeout_stale_fix_attempts() == []
 
 
@@ -525,7 +525,7 @@ def test_migrate_fingerprints_updates_fix_attempts_on_fingerprint_change():
 
 
 # ===========================================================================
-# request_fix — shared reaction-handler / HTTP API orchestration
+# request_fix: shared reaction-handler / HTTP API orchestration
 # ===========================================================================
 
 @pytest.fixture
@@ -586,7 +586,7 @@ def test_request_fix_renders_template_into_rendered_message(api, fp, prompt_path
 
 
 # ===========================================================================
-# _fmt_fix_history_lines — /fix-history slash command (§9)
+# _fmt_fix_history_lines: /fix-history slash command (§9)
 # ===========================================================================
 
 def test_fix_history_lines_empty():
