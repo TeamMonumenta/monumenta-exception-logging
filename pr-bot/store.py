@@ -34,6 +34,8 @@ class PrRow:
     checks_failing: bool
     updated_at: Optional[int]
     title: Optional[str]
+    # True when every review thread is resolved; suppresses 💬 for a bare 'commented' status.
+    comments_resolved: bool = False
 
 
 @dataclass
@@ -81,6 +83,7 @@ def _row_to_pr(row: sqlite3.Row) -> PrRow:
         closed_by=str(row["closed_by"]) if row["closed_by"] else None,
         labels=str(row["labels"]) if row["labels"] else "",
         checks_failing=bool(row["checks_failing"]),
+        comments_resolved=bool(row["comments_resolved"]),
         updated_at=int(row["updated_at"]) if row["updated_at"] else None,
         title=str(row["title"]) if row["title"] else None,
     )
@@ -169,6 +172,9 @@ class Store:
 
     def set_pr_checks_failing(self, repo: str, pr_number: int, checks_failing: bool) -> None:
         _db.set_pr_checks_failing(self._conn, repo, pr_number, int(checks_failing))
+
+    def set_pr_comments_resolved(self, repo: str, pr_number: int, resolved: bool) -> None:
+        _db.set_pr_comments_resolved(self._conn, repo, pr_number, int(resolved))
 
     def set_pr_title(self, repo: str, pr_number: int, title: str) -> None:
         _db.set_pr_title(self._conn, repo, pr_number, title)

@@ -12,7 +12,10 @@ A Discord bot that keeps `#pending-prs` reactions in sync with GitHub pull reque
 - Keeps each message's reactions matching the true PR state:
   - ✅ every linked PR approved
   - 💬 any open PR needs changes (or has a comment from someone **other than** the
-    PR author, configurable; a PR author commenting on their own PR never triggers 💬)
+    PR author, configurable; a PR author commenting on their own PR never triggers 💬).
+    A 💬 that comes only from comments (not a "changes requested" review) clears once
+    every review thread on the PR is resolved, and returns if a thread is unresolved
+    or a new comment review arrives
   - 🔀 all PRs merged (override with your `:merged:` custom emoji)
   - ❌ all PRs closed, at least one without merging
   - ❓ message has no PR links
@@ -129,8 +132,9 @@ kubectl create secret generic pr-bot \
 ### GitHub API token permissions (`GITHUB_API_TOKEN`)
 
 The token is **read-only**. It is used only for the on-ingest and startup state
-fetches (`GET .../pulls/{n}`, `.../pulls/{n}/reviews`, and
-`.../commits/{sha}/check-runs`); the bot never writes to GitHub. It needs read
+fetches (`GET .../pulls/{n}`, `.../pulls/{n}/reviews`,
+`.../commits/{sha}/check-runs`, and a GraphQL `reviewThreads` query for thread
+resolution); the bot never writes to GitHub. It needs read
 access to every repo in `GITHUB_REPOS`.
 
 **Fine-grained PAT** (recommended). Repository access: the tracked repos;
@@ -167,6 +171,7 @@ Register a GitHub webhook (org-level recommended) at `https://pr-bot.playmonumen
 |---|---|
 | **Pull requests** | 🔀/❌ merge & close reactions (`closed`), 🟢🟠🧪⚖️ label reactions (`labeled`/`unlabeled`), and ready-PR auto-post (`opened`/`labeled`) |
 | **Pull request reviews** | ✅/💬 review reactions and review DMs (`submitted`/`dismissed`) |
+| **Pull request review threads** | Clears 💬 when all review threads are resolved (`resolved`/`unresolved`) |
 | **Check suites** | 🐶 failing-check reaction and check-failure DMs (`completed`) |
 
 The bot also accepts GitHub's `ping` event so the webhook's initial delivery test

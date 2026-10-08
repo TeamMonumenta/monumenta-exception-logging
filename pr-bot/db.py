@@ -49,6 +49,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             closed_by      TEXT,
             labels         TEXT NOT NULL DEFAULT '',
             checks_failing INTEGER NOT NULL DEFAULT 0,
+            comments_resolved INTEGER NOT NULL DEFAULT 0,
             updated_at     INTEGER,
             title          TEXT,
             PRIMARY KEY (repo, pr_number)
@@ -72,6 +73,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     # Migrate existing DBs that predate the title column.
     try:
         conn.execute("ALTER TABLE prs ADD COLUMN title TEXT")
+    except sqlite3.OperationalError:
+        pass  # already exists
+    # Migrate existing DBs that predate the comments_resolved column.
+    try:
+        conn.execute("ALTER TABLE prs ADD COLUMN comments_resolved INTEGER NOT NULL DEFAULT 0")
     except sqlite3.OperationalError:
         pass  # already exists
 
@@ -233,6 +239,22 @@ def set_pr_checks_failing(
                 checks_failing=excluded.checks_failing, updated_at=excluded.updated_at
             """,
             (repo, pr_number, checks_failing, int(time.time())),
+        )
+
+
+def set_pr_comments_resolved(
+    conn: sqlite3.Connection, repo: str, pr_number: int, comments_resolved: int
+) -> None:
+    """Set only the comments_resolved column, preserving review/lifecycle/label state."""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO prs (repo, pr_number, comments_resolved, updated_at)
+            VALUES (?,?,?,?)
+            ON CONFLICT(repo, pr_number) DO UPDATE SET
+                comments_resolved=excluded.comments_resolved, updated_at=excluded.updated_at
+            """,
+            (repo, pr_number, comments_resolved, int(time.time())),
         )
 
 

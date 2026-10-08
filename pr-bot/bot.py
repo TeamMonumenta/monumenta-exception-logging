@@ -20,6 +20,7 @@ from github import (
     ParsedPrLink,
     PrLifecycleEvent,
     ReviewEvent,
+    ThreadEvent,
     WebhookEvent,
     match_label_categories,
     parse_autopost_message,
@@ -141,6 +142,7 @@ def _apply_review_event(
         checks_failing=pr.checks_failing,
         updated_at=int(time.time()),
         title=pr.title,
+        comments_resolved=pr.comments_resolved,
     )
 
 
@@ -169,7 +171,8 @@ def compute_desired_reactions(
         if p.review_status == "changes_requested":
             desired.add(config.reaction_changes)
             break
-        if config.review_comment_is_changes and p.review_status == "commented":
+        if (config.review_comment_is_changes and p.review_status == "commented"
+                and not p.comments_resolved):
             desired.add(config.reaction_changes)
             break
 
@@ -473,6 +476,9 @@ class PrBot(commands.Bot):
             checks = state["checks_failing"]
             if checks is not None:  # None = couldn't read checks; keep webhook-set state
                 self.store.set_pr_checks_failing(repo, pr_number, bool(checks))
+            resolved = state["comments_resolved"]
+            if resolved is not None:  # None = couldn't read threads; keep existing state
+                self.store.set_pr_comments_resolved(repo, pr_number, bool(resolved))
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("Failed to fetch PR state for %s#%d", repo, pr_number)
             # Leave the row uninitialized; reconcile will use defaults
@@ -613,6 +619,8 @@ class PrBot(commands.Bot):
             await self._handle_label_event(event)
         elif isinstance(event, CheckEvent):
             await self._handle_check_event(event)
+        elif isinstance(event, ThreadEvent):
+            await self._handle_thread_event(event)
         else:
             await self._handle_review_or_lifecycle(event)
 
@@ -653,6 +661,16 @@ class PrBot(commands.Bot):
                 merged_by=updated.merged_by,
                 closed_by=updated.closed_by,
             )
+            if event.action == "submitted" and event.review_state in ("commented", "changes_requested"):
+                # A review can open new threads, so re-read the thread state instead of
+                # guessing; this also avoids racing the separate review_thread webhook.
+                try:
+                    resolved = await self.github.fetch_comments_resolved(repo, pr_number)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    logger.exception("Failed to fetch review threads for %s#%d", repo, pr_number)
+                    resolved = None
+                if resolved is not None and resolved != existing.comments_resolved:
+                    self.store.set_pr_comments_resolved(repo, pr_number, resolved)
             new_status = updated.review_status
             new_merged = updated.merged
             new_closed = updated.closed
@@ -730,6 +748,36 @@ class PrBot(commands.Bot):
                 if _should_dm(pref, transition):
                     text = _format_dm(self.config, repo, pr_number, transition, actor)
                     await self._dm_user(author_id, text)
+
+    async def _handle_thread_event(self, event: ThreadEvent) -> None:
+        """Re-check whether all review threads are resolved; reconcile on change. No DM."""
+        repo = event.repo
+        pr_number = event.pr_number
+        messages = self.store.get_messages_for_pr(repo, pr_number)
+        if not messages:
+            logger.debug("%s#%d: no tracked messages link this PR", repo, pr_number)
+            return
+        try:
+            resolved = await self.github.fetch_comments_resolved(repo, pr_number)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Failed to fetch review threads for %s#%d", repo, pr_number)
+            return
+        if resolved is None:
+            return
+        existing = self.store.get_pr(repo, pr_number)
+        if existing is not None and existing.comments_resolved == resolved:
+            logger.debug("%s#%d: comments_resolved unchanged (%s)", repo, pr_number, resolved)
+            return
+        logger.info(
+            "%s#%d comments_resolved: %s -> %s (thread %s)",
+            repo, pr_number, existing.comments_resolved if existing else False,
+            resolved, event.action,
+        )
+        self.store.set_pr_comments_resolved(repo, pr_number, resolved)
+        for msg in messages:
+            if msg.done:
+                continue
+            await self.reconcile_message(msg.message_id)
 
     async def _handle_label_event(self, event: LabelEvent) -> None:
         """Apply a labeled/unlabeled/opened event (full label set) and reconcile.
@@ -990,24 +1038,30 @@ class PrBot(commands.Bot):
         checks_known = raw_checks is not None
         new_checks_failing = bool(raw_checks) if checks_known else pr.checks_failing
 
+        raw_resolved = state["comments_resolved"]
+        new_resolved = bool(raw_resolved) if raw_resolved is not None else pr.comments_resolved
+
         status_changed = new_status != pr.review_status
         merged_changed = new_merged and not pr.merged
         closed_changed = new_closed and not pr.closed and not new_merged
         labels_changed = new_labels != pr.labels
+        resolved_changed = new_resolved != pr.comments_resolved
         checks_failed_transition = checks_known and new_checks_failing and not pr.checks_failing
         checks_changed = checks_known and new_checks_failing != pr.checks_failing
 
         if not (status_changed or merged_changed or closed_changed
-                or labels_changed or checks_changed):
+                or labels_changed or checks_changed or resolved_changed):
             logger.debug("Startup poll %s#%d: no change", pr.repo, pr.pr_number)
             return
 
         logger.info(
             "Startup poll %s#%d: missed transition (review %s->%s, merged %s->%s, "
-            "closed %s->%s, labels %s->%s, checks_failing %s->%s)",
+            "closed %s->%s, labels %s->%s, checks_failing %s->%s, "
+            "comments_resolved %s->%s)",
             pr.repo, pr.pr_number, pr.review_status, new_status,
             pr.merged, new_merged, pr.closed, new_closed,
             pr.labels or "none", new_labels or "none", pr.checks_failing, new_checks_failing,
+            pr.comments_resolved, new_resolved,
         )
 
         self.store.upsert_pr(
@@ -1021,6 +1075,7 @@ class PrBot(commands.Bot):
         self.store.set_pr_labels(pr.repo, pr.pr_number, new_labels)
         if checks_known:
             self.store.set_pr_checks_failing(pr.repo, pr.pr_number, new_checks_failing)
+        self.store.set_pr_comments_resolved(pr.repo, pr.pr_number, new_resolved)
         messages = self.store.get_messages_for_pr(pr.repo, pr.pr_number)
         for msg in messages:
             await self.reconcile_message(msg.message_id)
@@ -1207,6 +1262,8 @@ class PrBot(commands.Bot):
                     extra = f", labels={pr.labels}" if pr.labels else ""
                     if pr.checks_failing:
                         extra += ", checks=FAILING"
+                    if pr.comments_resolved:
+                        extra += ", comments=resolved"
                     title_str = f' "{pr.title}"' if pr.title else ""
                     lines.append(
                         f"  {lnk.repo}#{lnk.pr_number}{title_str}: "

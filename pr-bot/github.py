@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 Byron Marohn
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -156,7 +157,14 @@ class CheckEvent:
     failing: bool            # this suite's own conclusion (fallback when REST is unreadable)
 
 
-WebhookEvent = ReviewEvent | PrLifecycleEvent | LabelEvent | CheckEvent
+@dataclass
+class ThreadEvent:
+    repo: str
+    pr_number: int
+    action: str         # "resolved" | "unresolved"
+
+
+WebhookEvent = ReviewEvent | PrLifecycleEvent | LabelEvent | CheckEvent | ThreadEvent
 
 
 def _parse_review_event(payload: dict[str, Any]) -> Optional[ReviewEvent]:
@@ -232,6 +240,17 @@ def _parse_check_suite_event(payload: dict[str, Any]) -> Optional[CheckEvent]:
     )
 
 
+def _parse_review_thread_event(payload: dict[str, Any]) -> Optional[ThreadEvent]:
+    action = str(payload.get("action", ""))
+    if action not in ("resolved", "unresolved"):
+        return None
+    return ThreadEvent(
+        repo=str(payload.get("repository", {}).get("full_name", "")).lower(),
+        pr_number=int(payload.get("pull_request", {}).get("number", 0)),
+        action=action,
+    )
+
+
 def parse_webhook_payload(
     event_type: str, payload: dict[str, Any]
 ) -> Optional[WebhookEvent]:
@@ -242,6 +261,8 @@ def parse_webhook_payload(
         return _parse_pull_request_event(payload)
     if event_type == "check_suite":
         return _parse_check_suite_event(payload)
+    if event_type == "pull_request_review_thread":
+        return _parse_review_thread_event(payload)
     return None
 
 
@@ -280,6 +301,20 @@ def _derive_review_status(
     return status, last_reviewer
 
 
+_REVIEW_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes { isResolved }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
 # ── REST client ────────────────────────────────────────────────────────────────
 
 class GitHubClient:
@@ -305,11 +340,13 @@ class GitHubClient:
     ) -> dict[str, Any]:
         """
         Return a dict with keys: review_status, merged, closed, last_reviewer,
-        merged_by, closed_by, pr_author, labels (raw names), checks_failing.
+        merged_by, closed_by, pr_author, labels (raw names), checks_failing,
+        comments_resolved.
 
         checks_failing is True/False, or None when the check status could not be
         read (see _fetch_checks_failing_for_sha). Callers must treat None as
-        "leave the existing check state alone".
+        "leave the existing check state alone". comments_resolved is None for the
+        same reason when the review threads could not be read.
         """
         async with aiohttp.ClientSession(headers=self._headers) as session:
             pr_data: dict[str, Any] = await self._get_json(
@@ -325,6 +362,9 @@ class GitHubClient:
             head_sha = str(pr_data.get("head", {}).get("sha", ""))
             checks_failing = await self._fetch_checks_failing_for_sha(
                 session, repo, head_sha
+            )
+            comments_resolved = await self._fetch_comments_resolved(
+                session, repo, pr_number
             )
 
         is_merged = bool(pr_data.get("merged", False))
@@ -354,7 +394,69 @@ class GitHubClient:
             "title": str(pr_data.get("title", "")),
             "labels": labels,
             "checks_failing": checks_failing,
+            "comments_resolved": comments_resolved,
         }
+
+    async def _fetch_comments_resolved(
+        self, session: aiohttp.ClientSession, repo: str, pr_number: int
+    ) -> Optional[bool]:
+        """
+        True if the PR has review threads and all are resolved, False if any is
+        unresolved or there are none, None if the state could not be read.
+
+        Thread resolution is only exposed through GraphQL, not REST. Any failure
+        returns None so callers keep the existing state.
+        """
+        owner, _, name = repo.partition("/")
+        total = 0
+        unresolved = 0
+        cursor: Optional[str] = None
+        try:
+            while True:
+                logger.debug("GitHub GraphQL reviewThreads %s#%d", repo, pr_number)
+                async with session.post(
+                    f"{self._BASE}/graphql",
+                    json={
+                        "query": _REVIEW_THREADS_QUERY,
+                        "variables": {
+                            "owner": owner, "name": name,
+                            "number": pr_number, "cursor": cursor,
+                        },
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    body: dict[str, Any] = await resp.json()
+                if body.get("errors"):
+                    logger.warning(
+                        "GitHub %s#%d: reviewThreads query failed: %s; leaving "
+                        "comment state unchanged", repo, pr_number, body["errors"],
+                    )
+                    return None
+                threads = body["data"]["repository"]["pullRequest"]["reviewThreads"]
+                for node in threads["nodes"]:
+                    total += 1
+                    if not node["isResolved"]:
+                        unresolved += 1
+                page = threads["pageInfo"]
+                if not page["hasNextPage"]:
+                    break
+                cursor = str(page["endCursor"])
+        except (aiohttp.ClientError, asyncio.TimeoutError, KeyError, TypeError) as exc:
+            logger.warning(
+                "GitHub %s#%d: reviewThreads fetch failed (%s); leaving comment "
+                "state unchanged", repo, pr_number, exc,
+            )
+            return None
+        logger.debug(
+            "GitHub %s#%d: %d review thread(s), %d unresolved",
+            repo, pr_number, total, unresolved,
+        )
+        return total > 0 and unresolved == 0
+
+    async def fetch_comments_resolved(self, repo: str, pr_number: int) -> Optional[bool]:
+        """Standalone form of _fetch_comments_resolved for thread webhook events."""
+        async with aiohttp.ClientSession(headers=self._headers) as session:
+            return await self._fetch_comments_resolved(session, repo, pr_number)
 
     async def _fetch_checks_failing_for_sha(
         self, session: aiohttp.ClientSession, repo: str, head_sha: str
