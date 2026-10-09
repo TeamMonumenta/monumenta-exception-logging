@@ -185,7 +185,7 @@ Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names a
 |---|---|---|---|
 | `/top` | `[window_hours=24]` | 20 | Top active groups by recent count |
 | `/new` | `[hours=24] [before]` | none (time-windowed only) | Groups first seen in the last N hours, optionally in the N-hour window ending at the `before` Unix timestamp |
-| `/search` | `query` | 20 | Search by exception class, message text, or stack frame (e.g. `ParticleManager.java`) |
+| `/search` | `query` | 20 | Search by exception class, message text, log message, stack frame (e.g. `ParticleManager.java`), or anything in the cause chain |
 | `/server` | `name` | 20 | Top active groups for a specific server |
 | `/muted` | - | 20 | List muted groups |
 | `/resolved` | - | 20 | List resolved groups |

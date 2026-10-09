@@ -365,7 +365,8 @@ def _add_list_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument('--server', default=None,
                     help="only groups this server has ever reported (see `exctl servers`)")
     sp.add_argument('--search', default=None,
-                    help="substring match over exception class, message, and stack trace")
+                    help="substring match over exception class, message, log message, "
+                         "stack trace, and cause chain")
     sp.add_argument('--sort', choices=_VALID_SORTS, default=None,
                     help="sort order, always descending (default: last_seen; "
                          "'recent' = count within --window-hours)")

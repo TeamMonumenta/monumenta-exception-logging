@@ -67,7 +67,8 @@ below for why the split runs where it does.
 - `canonical_trace`: the same JSON shape for *all* frames of the newest occurrence, not
   just the hashed ones. Used for the full stack in group detail views, and as the text
   blob that `/search`, `GET /api/groups?search=`, and notify rules match a stack frame
-  against.
+  against. `/search` and `?search=` also match `log_message_template` and
+  `cause_chain`; notify rules don't.
 - `cause_chain`: the flattened `cause` chain of the newest occurrence, outermost cause
   first, excluding the exception itself. Capped on ingest at `MAX_CAUSE_DEPTH` causes of
   `MAX_CAUSE_FRAMES` frames each (`tracker/ingest.py`); `/ingest` is unauthenticated, so

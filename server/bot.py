@@ -139,9 +139,11 @@ def format_notify_dm(details: GroupDetails, matching_rules: list[tuple[int, str]
 def _matches_notify(pattern: str, details: GroupDetails) -> bool:
     """Return True if the regex pattern matches any searchable field of the group.
 
-    Searches the same three fields as /search: exception class, normalized
-    message template, and canonical trace (reconstructed as a text blob of
-    class.method(file) entries). Match is case-sensitive.
+    Searches exception class, normalized message template, and canonical trace
+    (reconstructed as a text blob of class.method(file) entries). Match is
+    case-sensitive. Deliberately narrower than /search, which also covers the log
+    message and cause chain: widening this would make existing rules start
+    matching text their authors never tested them against.
     """
     rx = re.compile(pattern)
     trace_text = " ".join(
@@ -903,8 +905,8 @@ class ExceptionBot(commands.Bot):
             lines = [header] + [_fmt_new_line(g) for g in groups]
             await _send_chunks(interaction, lines)
 
-        @self.tree.command(name=f"{p}search", description="Search exception groups by class, message, or stack frame")
-        @app_commands.describe(query="Substring to search for in exception class, message, or stack trace (e.g. ParticleManager.java)")
+        @self.tree.command(name=f"{p}search", description="Search exception groups by class, message, log message, stack frame, or cause")
+        @app_commands.describe(query="Substring of class, message, log message, stack trace, or causes (e.g. ParticleManager.java)")
         async def cmd_search(interaction: discord.Interaction, query: str) -> None:
             await interaction.response.defer(ephemeral=True)
             groups = self.tracker.search_groups(query)

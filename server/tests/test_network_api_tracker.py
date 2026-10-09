@@ -546,3 +546,54 @@ def test_every_summary_query_populates_owning_frame(fresh_api, status, fetch):
     [g] = fetch(fresh_api)
     assert g.owning_frame is not None
     assert g.owning_frame.method == 'run'
+
+
+# ===========================================================================
+# Search over the log message and cause chain
+# ===========================================================================
+
+def _search_both(api: Tracker, query: str) -> tuple[list[str], list[str], int]:
+    """Run the same query through /search's and /api/groups' search paths."""
+    return (
+        [g.fingerprint for g in api.search_groups(query)],
+        [g.fingerprint for g in api.list_groups(search=query)],
+        api.count_groups(search=query),
+    )
+
+
+@pytest.mark.parametrize('query', [
+    'could not pass event',            # log message only, case-insensitive
+    'IllegalArgumentException',        # class of a cause, not the outer exception
+    'world unloaded',                  # a cause's message
+    'DepthsUtils.java',                # a frame that only appears in a cause
+])
+def test_search_matches_log_message_and_cause_chain(fresh_api, query):
+    ev = _wrapped_event()
+    ev['message'] = 'Could not pass event EntityDamageEvent to Monumenta v11.88.1'
+    fp, _ = fresh_api.ingest_event(parse_event(ev))
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))
+    assert _search_both(fresh_api, query) == ([fp], [fp], 1)
+
+
+def test_search_still_excludes_non_matching_groups(fresh_api):
+    fresh_api.ingest_event(parse_event(_wrapped_event()))
+    assert _search_both(fresh_api, 'no-such-text-anywhere') == ([], [], 0)
+
+
+@pytest.mark.parametrize('query', ['key "foo"', r'C:\path', '§cred', 'café'])
+def test_search_matches_cause_text_that_json_escapes(fresh_api, query):
+    ev = _wrapped_event()
+    ev['exception']['cause']['message'] = r'Unknown key "foo" in C:\path §cRed café'
+    fp, _ = fresh_api.ingest_event(parse_event(ev))
+    assert _search_both(fresh_api, query) == ([fp], [fp], 1)
+
+
+def test_search_combines_with_other_list_filters(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(_wrapped_event('valley-1')))
+    other, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT_2))
+    fresh_api.mute_group(other)
+    kwargs = {'search': 'world unloaded', 'server': 'valley-1', 'status': 'active'}
+    assert [g.fingerprint for g in fresh_api.list_groups(**kwargs)] == [fp]
+    assert fresh_api.count_groups(**kwargs) == 1
+    assert fresh_api.count_groups(**{**kwargs, 'status': 'muted'}) == 0
+    assert fresh_api.count_groups(**{**kwargs, 'server': 'survival-0'}) == 0

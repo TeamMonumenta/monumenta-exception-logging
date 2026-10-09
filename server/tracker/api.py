@@ -268,6 +268,40 @@ _VALID_SORTS = frozenset({*_SORT_COLUMNS.keys(), 'recent'})
 
 _LIST_GROUPS_MAX_LIMIT = 500
 
+# Columns a text search matches against, shared by search_groups (/search) and
+# list_groups (?search=) so the two can't drift. log_message_template is where
+# context like Paper's "Could not pass event X to Monumenta" lives, and cause_chain
+# is where a wrapped exception's real class and frames are; both are text (the
+# chain is JSON) so LIKE works on them like on canonical_trace.
+_SEARCH_COLUMNS = (
+    'exception_class', 'message_template', 'log_message_template',
+    'canonical_trace', 'cause_chain',
+)
+_JSON_SEARCH_COLUMNS = frozenset({'canonical_trace', 'cause_chain'})
+
+
+def _search_clause(query: str, table_alias: str = '') -> tuple[str, list[str]]:
+    """Case-insensitive substring match over _SEARCH_COLUMNS, as (sql, params).
+
+    The JSON columns are stored by json.dumps, which escapes quotes, backslashes and
+    every non-ASCII character, so a query like `key "foo"` or a `§` colour code would
+    never match a cause message as typed. Those columns are also matched against the
+    query encoded the same way. Python writes `\\uXXXX` in lowercase hex, so LOWER()
+    leaves the escapes intact.
+    """
+    prefix = f'{table_alias}.' if table_alias else ''
+    raw = f'%{query.lower()}%'
+    encoded = f'%{json.dumps(query.lower())[1:-1]}%'
+    parts: list[str] = []
+    params: list[str] = []
+    for col in _SEARCH_COLUMNS:
+        parts.append(f'LOWER({prefix}{col}) LIKE ?')
+        params.append(raw)
+        if col in _JSON_SEARCH_COLUMNS and encoded != raw:
+            parts.append(f'LOWER({prefix}{col}) LIKE ?')
+            params.append(encoded)
+    return f"({' OR '.join(parts)})", params
+
 
 # --- Tracker ---
 
@@ -479,26 +513,26 @@ class Tracker:
         return result
 
     def search_groups(self, query: str, limit: int = 20, window_hours: int = 24) -> list[GroupSummary]:
-        """Case-insensitive substring search over exception_class, message_template, and canonical_trace.
+        """Case-insensitive substring search over the columns in _SEARCH_COLUMNS: exception
+        class, normalized exception and log messages, the full stack trace, and the cause chain.
 
-        canonical_trace is stored as a JSON text blob, so a LIKE match over it catches file names
-        (e.g. "ParticleManager.java"), class names, and method names anywhere in the full stack trace.
+        canonical_trace and cause_chain are stored as JSON text, so a LIKE match over them
+        catches file names (e.g. "ParticleManager.java"), class names, and method names
+        anywhere in the trace or in any cause.
 
         Includes groups of all statuses.
         """
         cutoff = int(time.time()) - window_hours * 3600
-        pattern = f'%{query.lower()}%'
+        search_sql, search_params = _search_clause(query)
         rows = self._conn.execute(
-            """SELECT id, fingerprint, exception_class, message_template,
+            f"""SELECT id, fingerprint, exception_class, message_template,
                       status, first_seen, last_seen, total_count,
                       canonical_trace, cause_chain
                FROM error_groups
-               WHERE LOWER(exception_class) LIKE ?
-                  OR LOWER(message_template) LIKE ?
-                  OR LOWER(canonical_trace) LIKE ?
+               WHERE {search_sql}
                ORDER BY last_seen DESC
                LIMIT ?""",
-            (pattern, pattern, pattern, limit)
+            (*search_params, limit)
         ).fetchall()
         result: list[GroupSummary] = []
         for row in rows:
@@ -571,12 +605,9 @@ class Tracker:
             )
             params.append(server)
         if search is not None:
-            pattern = f'%{search.lower()}%'
-            clauses.append(
-                "(LOWER(g.exception_class) LIKE ? OR LOWER(g.message_template) LIKE ? "
-                "OR LOWER(g.canonical_trace) LIKE ?)"
-            )
-            params.extend([pattern, pattern, pattern])
+            search_sql, search_params = _search_clause(search, 'g')
+            clauses.append(search_sql)
+            params.extend(search_params)
         if new_within_hours is not None:
             cutoff = int(time.time()) - new_within_hours * 3600
             clauses.append("g.first_seen >= ?")
