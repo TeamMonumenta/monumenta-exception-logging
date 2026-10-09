@@ -149,7 +149,8 @@ At startup the server re-fingerprints all existing groups using the current norm
 rules. Groups whose fingerprint changes are updated in place; groups that become identical
 after re-normalization are merged (counts and occurrence records are combined, and any
 orphaned Discord message for the removed duplicate is deleted by the bot's next refresh tick).
-The migration is logged only when something changed, so normal restarts are quiet.
+The migration is logged only when something changed (a group updated or merged, or a stored
+`signature` backfilled), so normal restarts are quiet.
 
 See [SCHEMA.md](SCHEMA.md) for the exact rule order and why it matters, the full hash
 definition, and what a fingerprint deliberately excludes.

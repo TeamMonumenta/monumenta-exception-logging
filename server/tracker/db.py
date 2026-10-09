@@ -358,7 +358,10 @@ def migrate_fingerprints(
 ) -> dict[str, Any]:
     """Re-fingerprint all groups with the current normalization rules.
 
-    Returns a summary dict: {updated: N, merged: M, orphaned_discord_ids: [...]}.
+    Returns a summary dict: {updated: N, merged: M, signatures_backfilled: S,
+    orphaned_discord_ids: [...]}. signatures_backfilled counts groups whose fingerprint
+    is unchanged but whose stored signature differed from the recomputed one (empty,
+    for a group inserted before the column existed) and was rewritten.
     Inserts any orphaned Discord message IDs into pending_discord_deletes.
     All DB writes occur in a single transaction.
     """
@@ -376,6 +379,7 @@ def migrate_fingerprints(
 
     updated = 0
     merged = 0
+    signatures_backfilled = 0
     orphaned_discord_ids: list[str] = []
 
     with conn:
@@ -416,6 +420,7 @@ def migrate_fingerprints(
                         "UPDATE error_groups SET signature = ? WHERE id = ?",
                         (new_signature, row['id'])
                     )
+                    signatures_backfilled += 1
                 continue
 
             winner = conn.execute(
@@ -482,7 +487,12 @@ def migrate_fingerprints(
                 conn.execute("DELETE FROM error_groups WHERE id = ?", (row['id'],))
                 merged += 1
 
-    return {'updated': updated, 'merged': merged, 'orphaned_discord_ids': orphaned_discord_ids}
+    return {
+        'updated': updated,
+        'merged': merged,
+        'signatures_backfilled': signatures_backfilled,
+        'orphaned_discord_ids': orphaned_discord_ids,
+    }
 
 
 def add_pending_discord_delete(conn: sqlite3.Connection, message_id: str) -> None:

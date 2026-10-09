@@ -600,6 +600,13 @@ async def _expiry_loop(tracker: Tracker, bot: Optional["ExceptionBot"] = None) -
         await asyncio.sleep(3600)
 
 
+def _log_fingerprint_migration(result: dict[str, Any]) -> None:
+    """Log the startup re-fingerprint pass, but only when it changed something, so
+    a normal restart stays quiet while a run that rewrote rows is visible."""
+    if result['updated'] or result['merged'] or result['signatures_backfilled']:
+        logger.info('Fingerprint migration: %s', result)
+
+
 def _mask_token(token: str) -> str:
     if len(token) <= 2:
         return '*' * len(token)
@@ -667,9 +674,7 @@ async def main():
     )
 
     tracker = Tracker(config)
-    result = tracker.migrate_fingerprints()
-    if result['updated'] or result['merged']:
-        logger.info('Fingerprint migration: %s', result)
+    _log_fingerprint_migration(tracker.migrate_fingerprints())
 
     # Register signal handlers so both Ctrl+C and Kubernetes SIGTERM trigger a clean shutdown.
     stop = asyncio.Event()

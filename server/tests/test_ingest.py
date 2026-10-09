@@ -9,6 +9,7 @@ fingerprinting, normalization, and grouping work correctly end-to-end.
 
 import copy
 import json
+import logging
 import sys
 import os
 import sqlite3
@@ -22,6 +23,7 @@ from tracker.config import TrackerConfig
 from tracker.api import Tracker
 from tracker.fingerprint import compute_fingerprint, extract_app_frames, normalize_message
 from tracker.ingest import RAW_EVENT_CAP, parse_event
+from server import _log_fingerprint_migration
 from tests.fixtures import (
     EXAMPLE_EVENT,
     REAL_NPE_ALLAY,
@@ -817,9 +819,26 @@ def test_refingerprint_backfills_signature_for_older_groups(fresh_api):
     fresh_api._conn.commit()  # pylint: disable=protected-access
 
     from tracker.db import migrate_fingerprints
-    migrate_fingerprints(fresh_api._conn, ['com.playmonumenta'])  # pylint: disable=protected-access
+    result = migrate_fingerprints(fresh_api._conn, ['com.playmonumenta'])  # pylint: disable=protected-access
+    assert result['signatures_backfilled'] == 1
+    assert result['updated'] == 0 and result['merged'] == 0
+    # A second pass finds nothing left to backfill.
+    again = migrate_fingerprints(fresh_api._conn, ['com.playmonumenta'])  # pylint: disable=protected-access
+    assert again['signatures_backfilled'] == 0
 
     sig = fresh_api._conn.execute(  # pylint: disable=protected-access
         'SELECT signature FROM error_groups').fetchone()['signature']
     assert json.loads(sig)['message_template'] == \
         fresh_api.get_group_details(fp).message_template
+
+
+@pytest.mark.parametrize('counts, logged', [
+    ({'updated': 0, 'merged': 0, 'signatures_backfilled': 0}, False),
+    ({'updated': 0, 'merged': 0, 'signatures_backfilled': 122}, True),
+    ({'updated': 1, 'merged': 0, 'signatures_backfilled': 0}, True),
+    ({'updated': 0, 'merged': 2, 'signatures_backfilled': 0}, True),
+])
+def test_migration_is_logged_only_when_it_changed_something(caplog, counts, logged):
+    with caplog.at_level(logging.INFO):
+        _log_fingerprint_migration({**counts, 'orphaned_discord_ids': []})
+    assert ('Fingerprint migration' in caplog.text) == logged

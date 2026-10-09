@@ -424,7 +424,8 @@ occurrence in a group *by construction* - two events that normalize differently 
 different fingerprints and therefore different groups. Ingest writes them once, on
 insert, and never rewrites them; the only thing that does is the startup migration, which
 rewrites them together with the fingerprint they belong to (and which additionally
-backfills `signature` alone, for groups inserted before that column existed).
+backfills `signature` alone, for groups inserted before that column existed, and counts
+those as `signatures_backfilled` in its startup log line).
 
 **Description.** `canonical_frames`, `canonical_trace`, `logger`, `level`, `thread`,
 `log_message_template` and `cause_chain`. None of these is hashed, so rewriting them can

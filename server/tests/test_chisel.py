@@ -516,6 +516,8 @@ def test_migrate_fingerprints_updates_fix_attempts_on_fingerprint_change():
 
     result = tracker.migrate_fingerprints()
     assert result['updated'] >= 1
+    # The update path rewrites signature itself and is counted there, not again here.
+    assert result['signatures_backfilled'] == 0
 
     row = conn.execute(
         "SELECT fingerprint FROM fix_attempts WHERE job_id = ?", (job_id,)
