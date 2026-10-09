@@ -23,7 +23,9 @@ import pytest
 from tracker.config import TrackerConfig
 from tracker.api import GroupDetails, Tracker
 from tracker.ingest import parse_event
-from bot import format_exception_message, _build_frames_block
+from bot import (
+    format_exception_message, _build_frames_block, _fmt_new_line, _fmt_summary_line,
+)
 from tests.fixtures import EXAMPLE_EVENT, EXAMPLE_EVENT_2
 
 
@@ -453,3 +455,19 @@ def test_active_messages_filtered_by_flag(fresh_api):
     fps = [p[0] for p in pairs]
     assert fp2 in fps
     assert fp1 not in fps
+
+
+def test_summary_lines_show_the_owning_frame(fresh_api):
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    [g] = fresh_api.list_groups()
+    assert _fmt_summary_line(g).endswith(' at `GenericTargetBoss.<init>:34`')
+    assert _fmt_new_line(g).endswith(' at `GenericTargetBoss.<init>:34`')
+    assert '(via' not in _fmt_summary_line(g)
+
+
+def test_summary_lines_omit_owning_frame_when_there_is_none(fresh_api):
+    fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    [g] = fresh_api.list_groups()
+    g.owning_frame = None
+    assert ' at `' not in _fmt_summary_line(g)
+    assert ' at `' not in _fmt_new_line(g)

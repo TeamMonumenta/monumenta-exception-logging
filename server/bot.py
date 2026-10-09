@@ -193,13 +193,30 @@ def _format_api_token_created_message(token: str, expires_at: int, prefix: str) 
 # Summary list formatting (for slash command responses)
 # ---------------------------------------------------------------------------
 
+def _fmt_owning_suffix(g: GroupSummary) -> str:
+    """` at Foo.bar:42 (via CauseClass)` for a summary line, or "" without an owning frame.
+
+    Matches exctl's list line, so a wrapper class like ServerSchedulerException isn't
+    the only hint at where the bug is.
+    """
+    frame = g.owning_frame
+    if frame is None:
+        return ""
+    text = f"{frame.class_name.rsplit('.', 1)[-1]}.{frame.method}"
+    if frame.line >= 0:
+        text += f":{frame.line}"
+    if g.owning_cause_class:
+        text += f" (via {g.owning_cause_class.rsplit('.', 1)[-1]})"
+    return f" at `{text}`"
+
+
 def _fmt_summary_line(g: GroupSummary) -> str:
     fp8 = g.fingerprint[:8]
     servers = ",".join(sorted(g.server_counts.keys())) if g.server_counts else "—"
     return (
         f"`{fp8}` [{g.status}] **{g.exception_class}** "
         f"(recent: {g.recent_count}, total: {g.total_count}) "
-        f"servers: {servers}"
+        f"servers: {servers}" + _fmt_owning_suffix(g)
     )
 
 
@@ -210,7 +227,7 @@ def _fmt_new_line(g: GroupSummary) -> str:
     return (
         f"`{fp8}` [{g.status}] **{g.exception_class}** "
         f"(recent: {g.recent_count}, total: {g.total_count}) "
-        f"servers: {servers}   last seen: <t:{last_ts}:f>"
+        f"servers: {servers}   last seen: <t:{last_ts}:f>" + _fmt_owning_suffix(g)
     )
 
 

@@ -171,14 +171,38 @@ def fmt_timestamp(epoch: int) -> str:
     return datetime.fromtimestamp(epoch).strftime('%Y-%m-%d %H:%M:%S')
 
 
+def fmt_owning_frame(g: dict[str, Any]) -> Optional[str]:
+    """Short form of a group summary's owning frame, e.g.
+    `DepthsUtils$1.run:258 (via IllegalArgumentException)`, or None if it has none.
+
+    The `via` names the cause the frame came from, when it came from one: those are
+    the groups whose class alone misleads.
+    """
+    frame = g.get('owning_frame')
+    if not frame:
+        return None
+    simple_class = frame['class_name'].rsplit('.', 1)[-1]
+    text = f"{simple_class}.{frame['method']}"
+    if (frame.get('line') or -1) >= 0:
+        text += f":{frame['line']}"
+    via = g.get('owning_cause_class')
+    if via:
+        text += f" (via {via.rsplit('.', 1)[-1]})"
+    return text
+
+
 def fmt_group_line(g: dict[str, Any]) -> str:
     short_id = g['fingerprint'][:8]
     servers = ','.join(sorted(g['server_counts'].keys())) if g.get('server_counts') else '-'
-    return (
+    line = (
         f"{short_id} [{g['status']}] {g['exception_class']} "
         f"(recent: {g['recent_count']}, total: {g['total_count']}) "
         f"servers: {servers}   last seen: {fmt_timestamp(g['last_seen'])}"
     )
+    owning = fmt_owning_frame(g)
+    if owning is not None:
+        line += f"   at {owning}"
+    return line
 
 
 def fmt_list_footer(shown: int, total: int, offset: Any = 0) -> str:

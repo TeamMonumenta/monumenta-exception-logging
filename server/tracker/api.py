@@ -53,6 +53,13 @@ class GroupSummary:
     total_count: int
     recent_count: int               # occurrences within the queried time window
     server_counts: dict[str, int]   # server_id -> count within the queried time window
+    # Where the bug most likely lives: the first app frame of the deepest stored cause
+    # that has one, else the outer trace's first app frame, else None.
+    # owning_cause_class is the class of the cause it came from, None when it came
+    # from the outer trace. Deliberately no defaults, so a query feeding
+    # _row_to_summary that forgets the trace/cause columns fails loudly.
+    owning_frame: Optional[FrameSummary]
+    owning_cause_class: Optional[str]
 
 
 @dataclass
@@ -164,9 +171,48 @@ def _clamp_int(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(value, maximum))
 
 
+def _first_app_frame(
+    frames: list[dict[str, Any]], app_packages: list[str]
+) -> Optional[dict[str, Any]]:
+    return next(
+        (f for f in frames
+         if any(f.get('class_name', '').startswith(pkg) for pkg in app_packages)),
+        None,
+    )
+
+
+def _owning_frame(
+    row: sqlite3.Row, app_packages: list[str]
+) -> tuple[Optional[FrameSummary], Optional[str]]:
+    """Return (owning_frame, owning_cause_class) for a group row.
+
+    owning_cause_class is None when the frame came from the outer trace, so a client
+    can tell "found in a cause" apart even when the cause shares the outer class.
+
+    Searches the cause chain deepest first, since a wrapper's own frames are usually
+    scheduler or future plumbing and the bug is where the innermost app frame is.
+    Unlike extract_app_frames there is no fallback to non-app frames: a group with no
+    app frame anywhere gets None rather than a misleading JDK or server frame.
+    """
+    causes: list[dict[str, Any]] = json.loads(row['cause_chain'] or '[]')
+    for cause in reversed(causes):
+        frame = _first_app_frame(cause.get('frames', []), app_packages)
+        if frame is not None:
+            return _frames_from_dicts([frame])[0], cause['class_name']
+    frame = _first_app_frame(json.loads(row['canonical_trace']), app_packages)
+    if frame is not None:
+        return _frames_from_dicts([frame])[0], None
+    return None, None
+
+
 def _row_to_summary(
-    row: sqlite3.Row, recent_count: int, server_counts: dict[str, int]
+    row: sqlite3.Row, recent_count: int, server_counts: dict[str, int],
+    app_packages: list[str],
 ) -> GroupSummary:
+    """Build a GroupSummary. Every SELECT feeding this must include canonical_trace
+    and cause_chain alongside the plain group columns; sqlite3.Row raises IndexError
+    on a missing column, which is what catches a query that forgets them."""
+    owning_frame, owning_cause_class = _owning_frame(row, app_packages)
     return GroupSummary(
         fingerprint=row['fingerprint'],
         exception_class=row['exception_class'],
@@ -177,6 +223,8 @@ def _row_to_summary(
         total_count=row['total_count'],
         recent_count=recent_count,
         server_counts=server_counts,
+        owning_frame=owning_frame,
+        owning_cause_class=owning_cause_class,
     )
 
 
@@ -244,6 +292,7 @@ class Tracker:
         rows = self._conn.execute(
             """SELECT g.id, g.fingerprint, g.exception_class, g.message_template,
                       g.status, g.first_seen, g.last_seen, g.total_count,
+                      g.canonical_trace, g.cause_chain,
                       SUM(s.count) AS recent_count
                FROM error_groups g
                JOIN server_hour_counts s ON s.group_id = g.id
@@ -257,7 +306,8 @@ class Tracker:
         result: list[GroupSummary] = []
         for row in rows:
             server_counts = self._get_server_counts(row['id'], cutoff)
-            result.append(_row_to_summary(row, row['recent_count'], server_counts))
+            result.append(_row_to_summary(
+                row, row['recent_count'], server_counts, self._config.app_packages))
         return result
 
     def get_new_groups(self, hours: int = 24, before: Optional[int] = None) -> list[GroupSummary]:
@@ -275,6 +325,7 @@ class Tracker:
             rows = self._conn.execute(
                 """SELECT g.id, g.fingerprint, g.exception_class, g.message_template,
                           g.status, g.first_seen, g.total_count,
+                          g.canonical_trace, g.cause_chain,
                           COALESCE(
                               (SELECT MAX(o.timestamp) FROM occurrences o
                                WHERE o.group_id = g.id AND o.timestamp < ?),
@@ -288,7 +339,8 @@ class Tracker:
         else:
             rows = self._conn.execute(
                 """SELECT id, fingerprint, exception_class, message_template,
-                          status, first_seen, last_seen, total_count
+                          status, first_seen, last_seen, total_count,
+                          canonical_trace, cause_chain
                    FROM error_groups
                    WHERE first_seen >= ? AND first_seen <= ?
                    ORDER BY first_seen DESC""",
@@ -303,7 +355,8 @@ class Tracker:
                 (row['id'], cutoff)
             ).fetchone()
             server_counts = self._get_server_counts(row['id'], cutoff)
-            result.append(_row_to_summary(row, recent_count_row['cnt'], server_counts))
+            result.append(_row_to_summary(
+                row, recent_count_row['cnt'], server_counts, self._config.app_packages))
         return result
 
     def get_group_details(self, fingerprint: str) -> Optional[GroupDetails]:
@@ -388,6 +441,7 @@ class Tracker:
         rows = self._conn.execute(
             """SELECT g.id, g.fingerprint, g.exception_class, g.message_template,
                       g.status, g.first_seen, g.last_seen, g.total_count,
+                      g.canonical_trace, g.cause_chain,
                       SUM(s.count) AS recent_count
                FROM error_groups g
                JOIN server_hour_counts s ON s.group_id = g.id
@@ -402,7 +456,8 @@ class Tracker:
         result: list[GroupSummary] = []
         for row in rows:
             server_counts = self._get_server_counts(row['id'], cutoff)
-            result.append(_row_to_summary(row, row['recent_count'], server_counts))
+            result.append(_row_to_summary(
+                row, row['recent_count'], server_counts, self._config.app_packages))
         return result
 
     def search_groups(self, query: str, limit: int = 20, window_hours: int = 24) -> list[GroupSummary]:
@@ -417,7 +472,8 @@ class Tracker:
         pattern = f'%{query.lower()}%'
         rows = self._conn.execute(
             """SELECT id, fingerprint, exception_class, message_template,
-                      status, first_seen, last_seen, total_count
+                      status, first_seen, last_seen, total_count,
+                      canonical_trace, cause_chain
                FROM error_groups
                WHERE LOWER(exception_class) LIKE ?
                   OR LOWER(message_template) LIKE ?
@@ -435,14 +491,16 @@ class Tracker:
                 (row['id'], cutoff)
             ).fetchone()
             server_counts = self._get_server_counts(row['id'], cutoff)
-            result.append(_row_to_summary(row, recent_count_row['cnt'], server_counts))
+            result.append(_row_to_summary(
+                row, recent_count_row['cnt'], server_counts, self._config.app_packages))
         return result
 
     def _get_groups_by_status(self, status: str, limit: int, window_hours: int) -> list[GroupSummary]:
         cutoff = int(time.time()) - window_hours * 3600
         rows = self._conn.execute(
             """SELECT id, fingerprint, exception_class, message_template,
-                      status, first_seen, last_seen, total_count
+                      status, first_seen, last_seen, total_count,
+                      canonical_trace, cause_chain
                FROM error_groups
                WHERE status = ?
                ORDER BY last_seen DESC
@@ -458,7 +516,8 @@ class Tracker:
                 (row['id'], cutoff)
             ).fetchone()
             server_counts = self._get_server_counts(row['id'], cutoff)
-            result.append(_row_to_summary(row, recent_count_row['cnt'], server_counts))
+            result.append(_row_to_summary(
+                row, recent_count_row['cnt'], server_counts, self._config.app_packages))
         return result
 
     def get_muted_groups(self, limit: int = 20, window_hours: int = 24) -> list[GroupSummary]:
@@ -585,6 +644,7 @@ class Tracker:
             rows = self._conn.execute(
                 f"""SELECT g.id, g.fingerprint, g.exception_class, g.message_template,
                            g.status, g.first_seen, g.last_seen, g.total_count,
+                           g.canonical_trace, g.cause_chain,
                            COALESCE(
                                (SELECT SUM(s.count) FROM server_hour_counts s
                                 WHERE s.group_id = g.id AND s.hour_bucket >= ?), 0
@@ -599,7 +659,8 @@ class Tracker:
             order_col = _SORT_COLUMNS[sort]
             rows = self._conn.execute(
                 f"""SELECT g.id, g.fingerprint, g.exception_class, g.message_template,
-                           g.status, g.first_seen, g.last_seen, g.total_count
+                           g.status, g.first_seen, g.last_seen, g.total_count,
+                           g.canonical_trace, g.cause_chain
                     FROM error_groups g
                     {where_sql}
                     ORDER BY {order_col} DESC, g.id DESC
@@ -611,7 +672,10 @@ class Tracker:
         recent_counts, server_counts = self._batch_group_aggregates(group_ids, cutoff)
 
         return [
-            _row_to_summary(row, recent_counts.get(row['id'], 0), server_counts.get(row['id'], {}))
+            _row_to_summary(
+                row, recent_counts.get(row['id'], 0), server_counts.get(row['id'], {}),
+                self._config.app_packages,
+            )
             for row in rows
         ]
 

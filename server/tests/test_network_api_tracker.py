@@ -10,6 +10,7 @@ Covers:
 """
 
 import copy
+import time
 import sys
 import os
 
@@ -421,3 +422,127 @@ def test_server_filter_uses_the_index(fresh_api):
         ('alpha',)
     ).fetchall()
     assert any('idx_occurrences_server' in str(row['detail']) for row in plan), plan
+
+
+# ===========================================================================
+# owning_frame on GroupSummary
+# ===========================================================================
+
+def _wrapped_event(server_id: str = 'survival-0') -> dict:
+    """A scheduler wrapper whose only app frame is in the middle cause; the deepest
+    cause has no frames at all, so it must be skipped rather than chosen."""
+    ev = copy.deepcopy(EXAMPLE_EVENT)
+    ev['server_id'] = server_id
+    ev['exception'] = {
+        'class_name': 'com.destroystokyo.paper.exception.ServerSchedulerException',
+        'message': 'Task #1 generated an exception',
+        'frames': [{'class_name': 'org.bukkit.craftbukkit.scheduler.CraftScheduler',
+                    'method': 'mainThreadHeartbeat', 'file': 'CraftScheduler.java',
+                    'line': 497, 'location': None}],
+        'cause': {
+            'class_name': 'java.lang.IllegalArgumentException',
+            'message': 'World unloaded',
+            'frames': [
+                {'class_name': 'org.bukkit.World', 'method': 'getBlockAt',
+                 'file': 'World.java', 'line': 3, 'location': None},
+                {'class_name': 'com.playmonumenta.plugins.depths.DepthsUtils$1',
+                 'method': 'run', 'file': 'DepthsUtils.java', 'line': 258,
+                 'location': 'Monumenta.jar'},
+            ],
+            'cause': {
+                'class_name': 'java.lang.NullPointerException',
+                'message': None,
+                'frames': [],
+                'cause': None,
+            },
+        },
+    }
+    return ev
+
+
+def test_owning_frame_comes_from_outer_trace_without_causes(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    [g] = fresh_api.list_groups()
+    assert g.fingerprint == fp
+    assert g.owning_frame is not None
+    assert g.owning_frame.class_name == (
+        'com.playmonumenta.plugins.bosses.bosses.GenericTargetBoss')
+    assert g.owning_cause_class is None
+
+
+def test_owning_frame_prefers_deepest_cause_with_an_app_frame(fresh_api):
+    fresh_api.ingest_event(parse_event(_wrapped_event()))
+    [g] = fresh_api.list_groups()
+    assert g.owning_frame is not None
+    assert g.owning_frame.class_name == 'com.playmonumenta.plugins.depths.DepthsUtils$1'
+    assert g.owning_frame.line == 258
+    assert g.owning_frame.location == 'Monumenta.jar'
+    assert g.owning_cause_class == 'java.lang.IllegalArgumentException'
+
+
+def test_owning_frame_falls_back_to_outer_trace_when_no_cause_has_one(fresh_api):
+    ev = _wrapped_event()
+    ev['exception']['frames'].append(
+        {'class_name': 'com.playmonumenta.plugins.Outer', 'method': 'tick',
+         'file': 'Outer.java', 'line': 5, 'location': None})
+    ev['exception']['cause']['frames'].pop()  # drop the cause's only app frame
+    fresh_api.ingest_event(parse_event(ev))
+    [g] = fresh_api.list_groups()
+    assert g.owning_frame is not None
+    assert g.owning_frame.class_name == 'com.playmonumenta.plugins.Outer'
+    assert g.owning_cause_class is None
+
+
+def test_owning_frame_picks_the_deepest_of_several_causes(fresh_api):
+    ev = _wrapped_event()
+    ev['exception']['cause']['cause']['frames'] = [
+        {'class_name': 'com.playmonumenta.plugins.Inner', 'method': 'apply',
+         'file': 'Inner.java', 'line': 9, 'location': None}]
+    fresh_api.ingest_event(parse_event(ev))
+    [g] = fresh_api.list_groups()
+    assert g.owning_frame is not None
+    assert g.owning_frame.class_name == 'com.playmonumenta.plugins.Inner'
+    assert g.owning_cause_class == 'java.lang.NullPointerException'
+
+
+def test_owning_frame_is_none_without_any_app_frame(fresh_api):
+    ev = copy.deepcopy(EXAMPLE_EVENT)
+    for frame in ev['exception']['frames']:
+        frame['class_name'] = 'org.example.' + frame['class_name'].rsplit('.', 1)[-1]
+    fresh_api.ingest_event(parse_event(ev))
+    [g] = fresh_api.list_groups()
+    assert g.owning_frame is None
+    assert g.owning_cause_class is None
+
+
+def test_owning_frame_respects_configured_app_packages():
+    api = Tracker(TrackerConfig(db_path=':memory:', app_packages=['org.bukkit']))
+    api.ingest_event(parse_event(_wrapped_event()))
+    [g] = api.list_groups()
+    # org.bukkit.World is the cause's first frame matching the configured package.
+    assert g.owning_frame is not None
+    assert g.owning_frame.class_name == 'org.bukkit.World'
+
+
+@pytest.mark.parametrize('status, fetch', [
+    (None, lambda api: api.get_top_active_groups()),
+    (None, lambda api: api.get_new_groups()),
+    (None, lambda api: api.get_new_groups(before=int(time.time()) + 60)),
+    (None, lambda api: api.get_groups_for_server('survival-0')),
+    (None, lambda api: api.search_groups('ServerScheduler')),
+    ('muted', lambda api: api.get_muted_groups()),
+    ('resolved', lambda api: api.get_resolved_groups()),
+    (None, lambda api: api.list_groups()),
+    (None, lambda api: api.list_groups(sort='recent')),
+], ids=['top', 'new', 'new_before', 'server', 'search', 'muted', 'resolved', 'list',
+        'list_recent'])
+def test_every_summary_query_populates_owning_frame(fresh_api, status, fetch):
+    """Every query feeding _row_to_summary must select the trace and cause columns."""
+    fp, _ = fresh_api.ingest_event(parse_event(_wrapped_event()))
+    if status == 'muted':
+        fresh_api.mute_group(fp)
+    elif status == 'resolved':
+        fresh_api.resolve_group(fp)
+    [g] = fetch(fresh_api)
+    assert g.owning_frame is not None
+    assert g.owning_frame.method == 'run'

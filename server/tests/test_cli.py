@@ -250,6 +250,37 @@ def test_fmt_group_line_no_servers():
     assert 'servers: -' in exctl.fmt_group_line(g)
 
 
+def test_fmt_group_line_without_owning_frame_has_no_at():
+    g = {
+        'fingerprint': 'a' * 64, 'status': 'active', 'exception_class': 'X',
+        'recent_count': 0, 'total_count': 0, 'server_counts': {}, 'last_seen': 0,
+        'owning_frame': None, 'owning_cause_class': None,
+    }
+    assert ' at ' not in exctl.fmt_group_line(g)
+
+
+def test_fmt_group_line_shows_owning_frame():
+    g = {
+        'fingerprint': 'a' * 64, 'status': 'active',
+        'exception_class': 'java.lang.IllegalStateException',
+        'recent_count': 0, 'total_count': 0, 'server_counts': {}, 'last_seen': 0,
+        'owning_frame': {'class_name': 'com.example.Foo', 'method': 'bar',
+                         'file': 'Foo.java', 'line': 42, 'location': None},
+        'owning_cause_class': None,
+    }
+    assert exctl.fmt_group_line(g).endswith('   at Foo.bar:42')
+
+
+def test_fmt_owning_frame_names_the_cause_it_came_from():
+    g = {
+        'exception_class': 'java.util.concurrent.CompletionException',
+        'owning_frame': {'class_name': 'com.example.Foo$1', 'method': 'run',
+                         'file': None, 'line': -1, 'location': None},
+        'owning_cause_class': 'java.lang.ClassCastException',
+    }
+    assert exctl.fmt_owning_frame(g) == 'Foo$1.run (via ClassCastException)'
+
+
 def test_fmt_frame_line_with_file():
     frame = {'class_name': 'com.example.Foo', 'method': 'bar', 'file': 'Foo.java', 'line': 42}
     assert exctl.fmt_frame_line(frame) == "  at com.example.Foo.bar(Foo.java:42)"

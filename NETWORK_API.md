@@ -96,7 +96,15 @@ runs, swapped for the outcome emoji on completion, and the requester is DMed.
 
 Each element of `groups` carries `fingerprint`, `exception_class`, `message_template`,
 `status`, `first_seen`, `last_seen`, `total_count`, `recent_count` (occurrences within
-`window_hours`) and `server_counts` (the same window, broken down by server).
+`window_hours`), `server_counts` (the same window, broken down by server), and:
+
+| Field | Type | Notes |
+|---|---|---|
+| `owning_frame` | frame object \| null | Where the bug most likely is: the first application frame (per `APP_PACKAGES`) of the deepest stored cause that has one, else the first application frame of the outer trace, else null. Read from the most recent occurrence, like `cause_chain`, so it sees the same depth-capped chain. |
+| `owning_cause_class` | string \| null | Class of the cause `owning_frame` came from. Null when it came from the outer trace (the group's own `exception_class` applies) or when `owning_frame` is null. |
+
+`canonical_frames` is deliberately left out of the list: for a wrapped exception those
+frames are scheduler or future plumbing, and `owning_frame` is the useful one.
 
 ### Group details
 
@@ -117,8 +125,8 @@ Each element of `groups` carries `fingerprint`, `exception_class`, `message_temp
 | `latest_message`, `latest_log_message` | string \| null | Raw, un-normalized text from the newest retained occurrence; null once all occurrences have aged out. |
 | `muted_by`, `muted_at`, `resolved_by`, `resolved_at` | string \| integer \| null | Attribution for the current state; all four are null once a group is unmuted. |
 
-Frame objects everywhere (`canonical_frames`, `canonical_trace`, and each cause's
-`frames`) carry `class_name`, `method`, `file`, `line` and `location` - the source jar,
+Frame objects everywhere (`owning_frame`, `canonical_frames`, `canonical_trace`, and
+each cause's `frames`) carry `class_name`, `method`, `file`, `line` and `location` - the source jar,
 or null. The 24-hour and 7-day windows here are fixed and ignore `window_hours`.
 
 ### Fix attempts

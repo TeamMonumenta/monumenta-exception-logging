@@ -89,6 +89,8 @@ def _summary_to_json(g: GroupSummary) -> dict[str, Any]:
         'total_count': g.total_count,
         'recent_count': g.recent_count,
         'server_counts': g.server_counts,
+        'owning_frame': _frame_to_json(g.owning_frame) if g.owning_frame is not None else None,
+        'owning_cause_class': g.owning_cause_class,
     }
 
 

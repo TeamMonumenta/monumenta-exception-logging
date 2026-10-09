@@ -78,6 +78,8 @@ def _make_summary(**overrides) -> GroupSummary:
         "total_count": 5,
         "recent_count": 2,
         "server_counts": {"srv-1": 2},
+        "owning_frame": None,
+        "owning_cause_class": None,
     }
     defaults.update(overrides)
     return GroupSummary(**defaults)
@@ -126,6 +128,21 @@ def test_summary_to_json_all_fields_present():
     assert data['status'] == 'active'
     assert data['recent_count'] == 2
     assert data['server_counts'] == {'srv-1': 2}
+    # Present and null rather than omitted (see NETWORK_API.md's JSON conventions).
+    assert data['owning_frame'] is None
+    assert data['owning_cause_class'] is None
+
+
+def test_summary_to_json_owning_frame_shape():
+    frame = FrameSummary(class_name="com.example.Foo", method="bar", file="Foo.java",
+                         line=7, location="Example.jar")
+    data = _summary_to_json(_make_summary(
+        owning_frame=frame, owning_cause_class="java.lang.IllegalStateException"))
+    assert data['owning_frame'] == {
+        'class_name': 'com.example.Foo', 'method': 'bar', 'file': 'Foo.java',
+        'line': 7, 'location': 'Example.jar',
+    }
+    assert data['owning_cause_class'] == 'java.lang.IllegalStateException'
 
 
 def test_details_to_json_frame_shape():
@@ -242,6 +259,9 @@ def test_list_groups_returns_total_and_groups():
             data = await resp.get_json()
             assert data['total'] == 2
             assert len(data['groups']) == 2
+            for g in data['groups']:
+                assert g['owning_frame']['class_name'].startswith('com.playmonumenta.')
+                assert g['owning_cause_class'] is None
     _run(_inner())
 
 
