@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +28,7 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 _VALID_STATUSES = ('active', 'muted', 'resolved', 'all')
 _VALID_SORTS = ('last_seen', 'first_seen', 'total_count', 'recent')
+_FIX_STATUSES = ('pending', 'running', 'declined', 'success', 'failure', 'cancelled')
 
 # CLI command name -> API route segment. `reopen` is a CLI-only alias for `unmute`
 # (there is no separate /api/.../reopen route).
@@ -284,6 +286,48 @@ def fmt_fix_attempt(a: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def fmt_age(seconds: float) -> str:
+    """Compact duration, e.g. `47m` or `3h05m`."""
+    minutes = max(0, int(seconds // 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h{minutes % 60:02d}m"
+
+
+def fmt_fix_attempt_line(a: dict[str, Any], now: Optional[float] = None) -> str:
+    """One line per job for `fix-list`: enough to spot a stuck queue or a duplicate.
+
+    A live job also shows its age, since one nearing the server's one-hour timeout
+    is the thing to notice.
+    """
+    line = (f"{a['job_id']} [{a['status']}] group {a['fingerprint'][:8]} "
+            f"queued {fmt_timestamp(a['queued_at'])}")
+    if a['status'] in ('pending', 'running'):
+        current = time.time() if now is None else now
+        line += f" ({fmt_age(current - a['queued_at'])} ago)"
+    if a.get('started_at') is not None:
+        line += f", started {fmt_timestamp(a['started_at'])}"
+    if a.get('message'):
+        line += f"  {a['message']}"
+    return line
+
+
+def parse_fix_statuses(value: str) -> str:
+    """argparse type for `fix-list --status`: comma-separated statuses, or 'all'.
+
+    Validated client-side so a typo gets argparse's usage error instead of a round
+    trip, and returned as the normalized string the API takes.
+    """
+    statuses = [st.strip() for st in value.split(',') if st.strip()]
+    if not statuses:
+        raise argparse.ArgumentTypeError("expected at least one status")
+    for st in statuses:
+        if st != 'all' and st not in _FIX_STATUSES:
+            raise argparse.ArgumentTypeError(
+                f"invalid status {st!r} (choose from {', '.join(_FIX_STATUSES)}, all)")
+    return ','.join(statuses)
+
+
 _MUTATE_VERBS = {
     'mute': 'Muted',
     'unmute': 'Unmuted',
@@ -396,6 +440,25 @@ def build_parser() -> argparse.ArgumentParser:
                                 help="maximum attempts to return (default: 20)")
     sp_fix_history.add_argument('--json', action='store_true', help=_JSON_HELP)
 
+    sp_fix_list = sub.add_parser(
+        'fix-list', help="List fix attempts across every group (default: the live queue).",
+        description="List fix attempts across every group, newest first. By default "
+                    "shows only pending and running jobs: the ones Chisel has yet to "
+                    "finish.")
+    sp_fix_list.add_argument('--status', type=parse_fix_statuses, default='pending,running',
+                             help="comma-separated statuses to include, or 'all' "
+                                  f"({', '.join(_FIX_STATUSES)}; default: pending,running)")
+    sp_fix_list.add_argument('--limit', type=int, default=None,
+                             help="maximum attempts to return (default: 50, server cap: 500)")
+    sp_fix_list.add_argument('--json', action='store_true', help=_JSON_HELP)
+
+    sp_fix_cancel = sub.add_parser(
+        'fix-cancel', help="Withdraw a pending fix attempt before Chisel claims it.",
+        description="Withdraw a pending fix attempt before Chisel claims it. A job "
+                    "Chisel is already running can't be cancelled.")
+    sp_fix_cancel.add_argument('job_id', help="job ID printed by `exctl fix` or `fix-list`")
+    sp_fix_cancel.add_argument('--json', action='store_true', help=_JSON_HELP)
+
     sp_health = sub.add_parser(
         'health', help="Check that the server is reachable and responding.",
         description="Check that the server is reachable and responding. Useful for "
@@ -468,7 +531,8 @@ def _cmd_health(args: argparse.Namespace, base_url: str, timeout: int) -> int:
     return 0
 
 
-def _cmd_mutate(args: argparse.Namespace, base_url: str, timeout: int) -> int:
+def _require_token() -> Optional[str]:
+    """$EXCTL_API_TOKEN, or None after printing why it's needed."""
     token = resolve_api_token(dict(os.environ))
     if not token:
         print(
@@ -476,6 +540,13 @@ def _cmd_mutate(args: argparse.Namespace, base_url: str, timeout: int) -> int:
             "Run /api-token create in Discord to mint one.",
             file=sys.stderr,
         )
+        return None
+    return token
+
+
+def _cmd_mutate(args: argparse.Namespace, base_url: str, timeout: int) -> int:
+    token = _require_token()
+    if token is None:
         return 1
     route = _MUTATE_ROUTES[args.command]
     result = request(
@@ -517,6 +588,37 @@ def _cmd_fix_history(args: argparse.Namespace, base_url: str, timeout: int) -> i
     return 0
 
 
+def _cmd_fix_list(args: argparse.Namespace, base_url: str, timeout: int) -> int:
+    query: dict[str, Any] = {'status': args.status}
+    if args.limit is not None:
+        query['limit'] = args.limit
+    result = request(base_url, 'GET', f'/api/fix-attempts?{urllib.parse.urlencode(query)}',
+                     timeout)
+    if args.json:
+        print(json.dumps(result))
+        return 0
+    attempts = result['fix_attempts']
+    if not attempts:
+        print(f"No fix attempts ({args.status}).")
+        return 0
+    for a in attempts:
+        print(fmt_fix_attempt_line(a))
+    return 0
+
+
+def _cmd_fix_cancel(args: argparse.Namespace, base_url: str, timeout: int) -> int:
+    token = _require_token()
+    if token is None:
+        return 1
+    result = request(base_url, 'POST', f'/api/fix-attempts/{quote_id(args.job_id)}/cancel',
+                     timeout, token=token)
+    if args.json:
+        print(json.dumps(result))
+        return 0
+    print(f"Cancelled job {result['job_id']} for group {result['fingerprint'][:8]}")
+    return 0
+
+
 _HANDLERS = {
     'list': _cmd_list, 'top': _cmd_list, 'new': _cmd_list,
     'show': _cmd_show,
@@ -527,6 +629,8 @@ _HANDLERS = {
     'resolve': _cmd_mutate, 'fix': _cmd_mutate,
     'fix-status': _cmd_fix_status,
     'fix-history': _cmd_fix_history,
+    'fix-list': _cmd_fix_list,
+    'fix-cancel': _cmd_fix_cancel,
 }
 
 

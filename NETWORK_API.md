@@ -69,18 +69,22 @@ until they are.
 | `GET` | `/api/groups/<id>` | - | Full group details; `404` if unknown. See "Group details" below. |
 | `GET` | `/api/groups/<id>/occurrences` | `limit=20` (<=500) | `{occurrences: [...]}`, newest first. Each is `{timestamp, server, message, log_message}`, both messages raw and un-normalized. `log_message` is often where per-event context lives (Paper's scheduler puts the task id there). |
 | `GET` | `/api/groups/<id>/fix-attempts` | `limit=20` (<=500) | `{fix_attempts: [...]}`, newest first. |
+| `GET` | `/api/fix-attempts` | `status` (comma-separated, or `all`), `limit=50` (<=500) | `{fix_attempts: [...]}` across every group, newest first. `status=pending,running` is the live Chisel queue. Omitted or `all` means every status; an unknown status is `400`. |
 | `GET` | `/api/fix-attempts/<job_id>` | - | Single fix attempt; `404` if unknown. |
 | `GET` | `/api/servers` | - | `{"servers": [...]}` - every server that has ever contributed a retained occurrence, sorted. |
 | `POST` | `/api/groups/<id>/mute` | `Authorization: Bearer` | Updated group details JSON. |
 | `POST` | `/api/groups/<id>/unmute` | `Authorization: Bearer` | Also un-resolves, matching `/unmute`'s behavior, and clears both attributions. |
 | `POST` | `/api/groups/<id>/resolve` | `Authorization: Bearer` | Updated group details JSON. |
+| `POST` | `/api/fix-attempts/<job_id>/cancel` | `Authorization: Bearer` | Withdraws a `pending` attempt; returns the updated fix attempt with `status: "cancelled"` and `message: "Cancelled by <name>"`. `404` unknown job, `401` missing/invalid token, `403` token's `discord_id` not in `CHISEL_ALLOWED_USERS` (only when that list is non-empty), `409` the attempt isn't `pending` (Chisel has claimed it, or it has finished). |
 | `POST` | `/api/groups/<id>/fix` | `Authorization: Bearer` | `{"job_id": "..."}`. `404` unknown group, `401` missing/invalid token, `503` Chisel not configured, `403` token's `discord_id` not in `CHISEL_ALLOWED_USERS` (only when that list is non-empty), `409` a fix attempt is already active for the group. |
 
-Every successful mutation also re-edits the group's Discord channel message, if it has
+Every successful group mutation also re-edits the group's Discord channel message, if it has
 one, so the two surfaces never disagree. A fix requested through
 `POST /api/groups/<id>/fix` gets the same Discord treatment as one triggered by the
 wrench reaction: the working emoji is added to the group's channel message while it
-runs, swapped for the outcome emoji on completion, and the requester is DMed.
+runs, swapped for the outcome emoji on completion, and the requester is DMed. A
+cancel removes the working emoji without adding an outcome one, and DMs the requester
+only when someone else cancelled their job.
 
 ### `GET /api/groups` query parameters
 
@@ -131,10 +135,11 @@ or null. The 24-hour and 7-day windows here are fixed and ignore `window_hours`.
 
 ### Fix attempts
 
-Both fix-attempt endpoints return `{job_id, fingerprint, status, message, summary,
-pr_url, queued_at, started_at, completed_at}`. `status` is one of `pending`, `running`,
-`declined`, `success`, `failure`; `message`, `summary` and `pr_url` are populated on
-completion, and `pr_url` only on `success`. The `detail` column that Chisel reports is
+Every fix-attempt endpoint returns, per attempt, `{job_id, fingerprint, status,
+message, summary, pr_url, queued_at, started_at, completed_at}`. `status` is one of
+`pending`, `running`, `declined`, `success`, `failure`, `cancelled`; `message`,
+`summary` and `pr_url` are populated on completion, and `pr_url` only on `success`.
+A cancel sets only `message` and `completed_at`. The `detail` column that Chisel reports is
 stored but not served. See [SCHEMA.md](SCHEMA.md)'s `fix_attempts` section for the
 lifecycle, including the one-hour timeout.
 

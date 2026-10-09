@@ -7,6 +7,42 @@ from typing import Any, Optional
 from .config import TrackerConfig
 
 
+# Kept outside _create_tables because _migrate_fix_attempts_status rebuilds the table
+# from the same definition. {name} is the table name, so the rebuild can create the
+# new table beside the old one before swapping them.
+_FIX_ATTEMPTS_DDL = """
+    CREATE TABLE IF NOT EXISTS {name} (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id                   TEXT NOT NULL UNIQUE,
+        fingerprint              TEXT NOT NULL,
+        status                   TEXT NOT NULL DEFAULT 'pending'
+                                 CHECK (status IN ('pending', 'running', 'declined',
+                                                   'success', 'failure', 'cancelled')),
+        rendered_message         TEXT NOT NULL,
+        requested_by_discord_id  TEXT,
+        message                  TEXT,
+        summary                  TEXT,
+        detail                   TEXT,
+        pr_url                   TEXT,
+        queued_at                INTEGER NOT NULL,
+        started_at               INTEGER,
+        completed_at             INTEGER
+    );
+"""
+
+_FIX_ATTEMPTS_INDEXES = """
+    CREATE INDEX IF NOT EXISTS idx_fix_attempts_fingerprint
+        ON fix_attempts(fingerprint);
+    CREATE INDEX IF NOT EXISTS idx_fix_attempts_status
+        ON fix_attempts(status, queued_at);
+"""
+
+_FIX_ATTEMPTS_COLUMNS = (
+    "id, job_id, fingerprint, status, rendered_message, requested_by_discord_id, "
+    "message, summary, detail, pr_url, queued_at, started_at, completed_at"
+)
+
+
 def init_db(config: TrackerConfig) -> sqlite3.Connection:
     conn = sqlite3.connect(config.db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -19,7 +55,7 @@ def init_db(config: TrackerConfig) -> sqlite3.Connection:
 
 
 def _create_tables(conn: sqlite3.Connection) -> None:
-    conn.executescript("""
+    conn.executescript(_FIX_ATTEMPTS_DDL.format(name='fix_attempts') + _FIX_ATTEMPTS_INDEXES + """
         CREATE TABLE IF NOT EXISTS error_groups (
             id                 INTEGER PRIMARY KEY AUTOINCREMENT,
             fingerprint        TEXT NOT NULL UNIQUE,
@@ -115,28 +151,6 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             message_id TEXT PRIMARY KEY
         );
 
-        CREATE TABLE IF NOT EXISTS fix_attempts (
-            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id                   TEXT NOT NULL UNIQUE,
-            fingerprint              TEXT NOT NULL,
-            status                   TEXT NOT NULL DEFAULT 'pending'
-                                     CHECK (status IN ('pending', 'running', 'declined', 'success', 'failure')),
-            rendered_message         TEXT NOT NULL,
-            requested_by_discord_id  TEXT,
-            message                  TEXT,
-            summary                  TEXT,
-            detail                   TEXT,
-            pr_url                   TEXT,
-            queued_at                INTEGER NOT NULL,
-            started_at               INTEGER,
-            completed_at             INTEGER
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_fix_attempts_fingerprint
-            ON fix_attempts(fingerprint);
-        CREATE INDEX IF NOT EXISTS idx_fix_attempts_status
-            ON fix_attempts(status, queued_at);
-
         CREATE TABLE IF NOT EXISTS api_tokens (
             token_hash  TEXT PRIMARY KEY,
             discord_id  TEXT NOT NULL,
@@ -190,6 +204,50 @@ def _migrate(conn: sqlite3.Connection) -> None:
             # else (a locked database, say) must surface.
             if 'duplicate column name' not in str(e):
                 raise
+    _migrate_fix_attempts_status(conn)
+
+
+def _migrate_fix_attempts_status(conn: sqlite3.Connection) -> None:
+    """Rebuild fix_attempts on a database whose CHECK predates the 'cancelled' status.
+
+    SQLite can't alter a CHECK constraint in place, so this copies the rows into a
+    fresh table and swaps it in. BEGIN IMMEDIATE takes the write lock before the
+    re-check, so a second process opening the same database can't rebuild it twice.
+    """
+    def needs_rebuild() -> bool:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'fix_attempts'"
+        ).fetchone()
+        return row is not None and "'cancelled'" not in row['sql']
+
+    if not needs_rebuild():
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if needs_rebuild():
+            conn.execute(_FIX_ATTEMPTS_DDL.format(name='fix_attempts_new'))
+            conn.execute(
+                f"INSERT INTO fix_attempts_new ({_FIX_ATTEMPTS_COLUMNS}) "
+                f"SELECT {_FIX_ATTEMPTS_COLUMNS} FROM fix_attempts"
+            )
+            # Carry the AUTOINCREMENT high-water mark over, or ids of deleted rows
+            # past the current max would be handed out again. The copy above already
+            # gave the new table a sequence row (the max copied id), so replace it.
+            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'fix_attempts_new'")
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) "
+                "SELECT 'fix_attempts_new', seq FROM sqlite_sequence "
+                "WHERE name = 'fix_attempts'"
+            )
+            conn.execute("DROP TABLE fix_attempts")
+            conn.execute("ALTER TABLE fix_attempts_new RENAME TO fix_attempts")
+            for statement in _FIX_ATTEMPTS_INDEXES.split(';'):
+                if statement.strip():
+                    conn.execute(statement)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 def set_discord_message_id(
     conn: sqlite3.Connection, fingerprint: str, message_id: Optional[str]
@@ -484,6 +542,56 @@ def get_fix_attempts_for_group(
     ).fetchall()
 
 
+def list_fix_attempts(
+    conn: sqlite3.Connection, statuses: Optional[list[str]], limit: int
+) -> list[sqlite3.Row]:
+    """Return fix attempt rows across every group, newest first.
+
+    `statuses` None means no filter. The values are bound, not interpolated; only
+    the placeholder count is built into the SQL.
+    """
+    if statuses is None:
+        return conn.execute(
+            f"SELECT {_FIX_ATTEMPT_STATUS_COLUMNS} FROM fix_attempts "
+            "ORDER BY queued_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    placeholders = ','.join('?' * len(statuses))
+    return conn.execute(
+        f"SELECT {_FIX_ATTEMPT_STATUS_COLUMNS} FROM fix_attempts "
+        f"WHERE status IN ({placeholders}) ORDER BY queued_at DESC, id DESC LIMIT ?",
+        (*statuses, limit),
+    ).fetchall()
+
+
+def cancel_fix_attempt(
+    conn: sqlite3.Connection, job_id: str, message: str, completed_at: int
+) -> Optional[tuple[bool, str, Optional[str]]]:
+    """Cancel a pending fix attempt.
+
+    Returns (cancelled, status, requested_by_discord_id), or None if job_id is unknown.
+    `cancelled` is whether this call did it; `status` is the attempt's status
+    afterwards. The UPDATE's own status check decides, not an earlier read, so a
+    claim that lands first leaves the job running and is reported as such.
+    """
+    with conn:
+        cur = conn.execute(
+            "UPDATE fix_attempts SET status = 'cancelled', message = ?, completed_at = ? "
+            "WHERE job_id = ? AND status = 'pending'",
+            (message, completed_at, job_id),
+        )
+        row = conn.execute(
+            "SELECT requested_by_discord_id, status FROM fix_attempts WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    requester = (str(row['requested_by_discord_id'])
+                 if row['requested_by_discord_id'] is not None else None)
+    # rowcount, not row['status']: an attempt cancelled earlier also reads 'cancelled'.
+    return cur.rowcount == 1, str(row['status']), requester
+
+
 def has_active_fix_attempt(conn: sqlite3.Connection, fingerprint: str) -> bool:
     """Return True if any pending or running fix attempt exists for this fingerprint."""
     row = conn.execute(
@@ -526,7 +634,10 @@ def complete_fix_attempt(
 ) -> Optional[tuple[str, Optional[str]]]:
     """Record the result of a fix attempt.
 
-    Returns (fingerprint, requested_by_discord_id), or None if the job_id is unknown.
+    Returns (fingerprint, requested_by_discord_id), or None if the job_id is unknown
+    or was cancelled. A cancelled job was never handed to Chisel, so a callback for one
+    is stale or replayed and must not turn it back into a result. A timed-out
+    'failure' stays overwritable, since a late real result is better than the timeout.
     """
     with conn:
         row = conn.execute(
@@ -535,11 +646,13 @@ def complete_fix_attempt(
         ).fetchone()
         if row is None:
             return None
-        conn.execute(
+        cur = conn.execute(
             "UPDATE fix_attempts SET status = ?, message = ?, summary = ?, detail = ?, "
-            "pr_url = ?, completed_at = ? WHERE job_id = ?",
+            "pr_url = ?, completed_at = ? WHERE job_id = ? AND status != 'cancelled'",
             (status, message, summary, detail, pr_url, completed_at, job_id),
         )
+        if cur.rowcount == 0:
+            return None
     return str(row["fingerprint"]), (str(row["requested_by_discord_id"])
                                      if row["requested_by_discord_id"] is not None else None)
 

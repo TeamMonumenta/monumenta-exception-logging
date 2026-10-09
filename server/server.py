@@ -11,8 +11,8 @@ from quart import Quart, jsonify, request
 from werkzeug.exceptions import HTTPException, InternalServerError
 
 from tracker.api import (
-    CauseSummary, FixAttemptStatus, FrameSummary, GroupDetails, GroupSummary,
-    OccurrenceSummary, Tracker,
+    CancelFixOutcome, CauseSummary, FixAttemptStatus, FrameSummary, GroupDetails,
+    GroupSummary, OccurrenceSummary, Tracker,
 )
 from tracker.chisel import FixRequestOutcome, request_fix
 from tracker.config import from_env
@@ -279,7 +279,7 @@ def create_app(
         })
 
     @app.post('/chisel/callback/<job_id>')
-    async def chisel_callback(job_id: str):
+    async def chisel_callback(job_id: str):  # pylint: disable=too-many-return-statements
         if not chisel_public_url:
             return jsonify({'error': 'chisel integration not configured'}), 503
         raw = await request.get_json(force=True)
@@ -288,6 +288,12 @@ def create_app(
         status = raw.get('status')
         if status not in ('success', 'failure', 'declined'):
             return jsonify({'error': 'status must be success, failure, or declined'}), 400
+        existing = tracker.get_fix_attempt(job_id)
+        if existing is None:
+            return jsonify({'error': 'unknown job_id'}), 404
+        if existing.status == 'cancelled':
+            # Never handed to Chisel, so this callback is stale or replayed.
+            return jsonify({'error': 'fix attempt was cancelled'}), 409
         result = tracker.complete_fix_attempt(
             job_id,
             status=str(status),
@@ -389,6 +395,23 @@ def create_app(
         attempts = tracker.get_fix_attempts_for_group(fingerprint, limit=limit)
         return jsonify({'fix_attempts': [_fix_attempt_to_json(a) for a in attempts]})
 
+    @app.get('/api/fix-attempts')
+    async def api_list_fix_attempts():
+        # `status` is comma-separated (e.g. pending,running) so the queue can be read in
+        # one call. Omitted or 'all' means every status, matching /api/groups.
+        raw_status = request.args.get('status', '')
+        statuses = [st.strip() for st in raw_status.split(',') if st.strip()]
+        if 'all' in statuses:
+            statuses = []
+        limit = _parse_int(request.args.get('limit'), 50)
+        if limit is _INT_PARSE_ERROR:
+            return jsonify({'error': 'limit must be an integer'}), 400
+        try:
+            attempts = tracker.list_fix_attempts(statuses, limit=limit)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        return jsonify({'fix_attempts': [_fix_attempt_to_json(a) for a in attempts]})
+
     @app.get('/api/fix-attempts/<job_id>')
     async def api_get_fix_attempt(job_id: str):
         status = tracker.get_fix_attempt(job_id)
@@ -477,6 +500,42 @@ def create_app(
             return jsonify({'error': 'fix prompt template could not be read'}), 500
         # NOT_CONFIGURED can't happen here since chisel_public_url was checked above.
         return jsonify({'error': 'fix request failed'}), 500
+
+    @app.post('/api/fix-attempts/<job_id>/cancel')
+    async def api_cancel_fix_attempt(job_id: str):  # pylint: disable=too-many-return-statements
+        # Same precedence as /fix: unknown job -> 404 before the token is checked;
+        # then 401; then 403 when CHISEL_ALLOWED_USERS is set and excludes the caller,
+        # since anyone who can't request a fix shouldn't be able to withdraw one either.
+        if tracker.get_fix_attempt(job_id) is None:
+            return jsonify({'error': 'unknown job_id'}), 404
+        discord_id = _require_authenticated_discord_id(tracker)
+        if not isinstance(discord_id, str):
+            return discord_id
+        if allowed_users and discord_id not in allowed_users:
+            return jsonify({'error': 'discord_id not authorized to cancel fixes'}), 403
+
+        actor = await _resolve_actor(discord_id)
+        result = tracker.cancel_fix_attempt(job_id, actor=actor)
+        if result.outcome == CancelFixOutcome.NOT_FOUND:
+            return jsonify({'error': 'unknown job_id'}), 404
+        if result.outcome == CancelFixOutcome.NOT_PENDING:
+            return jsonify({
+                'error': f'only a pending fix attempt can be cancelled; this one is {result.status}'
+            }), 409
+        status = tracker.get_fix_attempt(job_id)
+        if status is None:  # unreachable: fix attempts are never deleted
+            return jsonify({'error': 'unknown job_id'}), 404
+        logger.info("Fix attempt %s for group %s cancelled by %s",
+                    job_id, status.fingerprint[:8], discord_id)
+        if bot is not None:
+            # Clears the working reaction. The requester is only DMed when someone
+            # else cancelled their job; they already know if they did it themselves.
+            requester = (result.requested_by_discord_id
+                         if result.requested_by_discord_id != discord_id else None)
+            _track_task(asyncio.create_task(bot.on_fix_attempt_completed(
+                status.fingerprint, 'cancelled', status.message or '', '', None, requester,
+            )))
+        return jsonify(_fix_attempt_to_json(status))
 
     # Quart's default error pages are HTML. For /api/* that means a typo'd path or an
     # unhandled DB error reaches the CLI as a wall of markup it can't pull a message

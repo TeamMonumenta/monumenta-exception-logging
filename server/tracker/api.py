@@ -16,6 +16,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Optional
 
 from .config import TrackerConfig
@@ -73,13 +74,30 @@ class FixAttemptJob:
 class FixAttemptStatus:
     job_id: str
     fingerprint: str
-    status: str              # 'pending' | 'running' | 'declined' | 'success' | 'failure'
+    # 'pending' | 'running' | 'declined' | 'success' | 'failure' | 'cancelled'
+    status: str
     message: Optional[str]
     summary: Optional[str]
     pr_url: Optional[str]
     queued_at: datetime
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+
+
+FIX_ATTEMPT_STATUSES = ('pending', 'running', 'declined', 'success', 'failure', 'cancelled')
+
+
+class CancelFixOutcome(Enum):
+    CANCELLED = "cancelled"
+    NOT_FOUND = "not_found"
+    NOT_PENDING = "not_pending"  # already claimed by Chisel, or finished
+
+
+@dataclass
+class CancelFixResult:
+    outcome: CancelFixOutcome
+    requested_by_discord_id: Optional[str] = None
+    status: Optional[str] = None  # status after the call: 'cancelled', or why it wasn't
 
 
 @dataclass
@@ -980,6 +998,41 @@ class Tracker:
         rows = db.get_fix_attempts_for_group(self._conn, fingerprint, limit)
         return [_row_to_fix_attempt_status(row) for row in rows]
 
+    def list_fix_attempts(
+        self, statuses: Optional[list[str]] = None, limit: int = 50
+    ) -> list[FixAttemptStatus]:
+        """Return fix attempts across every group, newest first.
+
+        `statuses` None or empty means every status. Raises ValueError for an unknown
+        status. `limit` is clamped like the other listing methods.
+        """
+        if statuses:
+            unknown = [st for st in statuses if st not in FIX_ATTEMPT_STATUSES]
+            if unknown:
+                raise ValueError(f"invalid status: {unknown[0]!r}")
+        limit = _clamp_int(limit, 0, _LIST_GROUPS_MAX_LIMIT)
+        rows = db.list_fix_attempts(self._conn, statuses or None, limit)
+        return [_row_to_fix_attempt_status(row) for row in rows]
+
+    def cancel_fix_attempt(self, job_id: str, actor: str = "unknown") -> CancelFixResult:
+        """Withdraw a pending fix attempt before Chisel claims it.
+
+        Only 'pending' can be cancelled: once Chisel has claimed a job there is no
+        channel to tell it to stop, so a running job is left to finish or time out.
+        The cancel is recorded as status 'cancelled' with "Cancelled by <actor>" as
+        its message, which also frees the group for a new fix request.
+        """
+        result = db.cancel_fix_attempt(
+            self._conn, job_id, f"Cancelled by {actor}", int(time.time()))
+        if result is None:
+            return CancelFixResult(CancelFixOutcome.NOT_FOUND)
+        cancelled, status, requester = result
+        return CancelFixResult(
+            CancelFixOutcome.CANCELLED if cancelled else CancelFixOutcome.NOT_PENDING,
+            requested_by_discord_id=requester,
+            status=status,
+        )
+
     def claim_fix_attempt(self) -> Optional[FixAttemptJob]:
         """Atomically claim the oldest pending fix attempt.
 
@@ -1072,7 +1125,8 @@ class Tracker:
     ) -> Optional[tuple[str, Optional[str]]]:
         """Record the result of a fix attempt.
 
-        Returns (fingerprint, requested_by_discord_id), or None if the job_id is unknown.
+        Returns (fingerprint, requested_by_discord_id), or None if the job_id is unknown
+        or the attempt was cancelled (see db.complete_fix_attempt).
         """
         return db.complete_fix_attempt(
             self._conn, job_id, status, message, summary, detail, pr_url, int(time.time())

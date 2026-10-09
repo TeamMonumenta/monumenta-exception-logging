@@ -240,7 +240,8 @@ CREATE TABLE fix_attempts (
     job_id                   TEXT NOT NULL UNIQUE,          -- UUID generated at queue time; embedded in callback_url
     fingerprint              TEXT NOT NULL,                 -- links to the exception group (not a FK)
     status                   TEXT NOT NULL DEFAULT 'pending'
-                             CHECK (status IN ('pending', 'running', 'declined', 'success', 'failure')),
+                             CHECK (status IN ('pending', 'running', 'declined',
+                                               'success', 'failure', 'cancelled')),
     rendered_message         TEXT NOT NULL,                 -- rendered fix_exception_prompt.md, stored at queue time
     requested_by_discord_id  TEXT,                          -- Discord user snowflake who triggered the fix
     message                  TEXT,                          -- short human-readable status (populated on completion)
@@ -265,6 +266,7 @@ CREATE INDEX idx_fix_attempts_status      ON fix_attempts(status, queued_at);
 | `declined` | Agent declined the task (wrong package, too complex, etc.) |
 | `success` | Agent created a PR; `pr_url` is populated |
 | `failure` | Agent failed, or the attempt timed out |
+| `cancelled` | Withdrawn via `POST /api/fix-attempts/<job_id>/cancel` while still `pending`; `message` is `Cancelled by <name>` |
 
 **Notes:**
 
@@ -278,6 +280,13 @@ CREATE INDEX idx_fix_attempts_status      ON fix_attempts(status, queued_at);
 - `rendered_message` is the fully rendered prompt template captured at queue time, not at
   poll time. This is intentional: the state at the moment of the fix request is what
   Chisel acts on.
+- Only a `pending` attempt can be cancelled. Chisel has no channel for being told to
+  stop, so a `running` one is left to finish or time out. A Chisel callback for a
+  `cancelled` attempt is rejected, so it can't be turned back into a result; a timed-out
+  `failure` can still be overwritten by a late callback.
+- A database created before `cancelled` existed has the old five-value `CHECK`. SQLite
+  can't alter a constraint in place, so `_migrate_fix_attempts_status` copies the rows
+  into a new table with the current definition and swaps it in, once, at startup.
 - Nothing reconciles a `running` job whose worker died, so the hourly maintenance pass
   transitions any `pending` or `running` job older than 1 hour to `failure` with
   `message = 'Timed out: no response received'` (see "Auto-expiry" below). Without that

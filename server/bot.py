@@ -264,7 +264,8 @@ def _fmt_fix_history_lines(short_id: str, attempts: list[FixAttemptStatus]) -> l
         return lines
     for a in attempts:
         ts = int(a.queued_at.timestamp())
-        lines.append(f"`{a.job_id[:8]}` [{a.status}] - queued <t:{ts}:f>")
+        # The full job ID, since that's what `exctl fix-status`/`fix-cancel` take.
+        lines.append(f"`{a.job_id}` [{a.status}] - queued <t:{ts}:f>")
         if a.message:
             lines.append(f"  {a.message}")
         if a.pr_url:
@@ -754,6 +755,9 @@ class ExceptionBot(commands.Bot):
             "success": self._reaction_fix_success,
             "failure": self._reaction_fix_failure,
             "declined": self._reaction_fix_declined,
+            # A cancelled job never ran, so it gets no outcome emoji; the working
+            # reaction is just removed.
+            "cancelled": "",
         }.get(status, self._reaction_fix_failure)
 
         discord_message_url: Optional[str] = None
@@ -778,7 +782,9 @@ class ExceptionBot(commands.Bot):
                         fingerprint[:8],
                     )
 
-        if pr_url:
+        if status == "cancelled":
+            logger.info("Fix cancelled for group %s: %s", fingerprint[:8], message)
+        elif pr_url:
             logger.info("Fix completed for group %s: %s - %s", fingerprint[:8], status, pr_url)
         else:
             logger.info("Fix completed for group %s: %s", fingerprint[:8], status)
@@ -801,7 +807,11 @@ class ExceptionBot(commands.Bot):
     ) -> None:
         """DM the user who requested a fix with the outcome."""
         fp8 = fingerprint[:8]
-        status_line = f"Fix attempt **{status}** for exception `{fp8}`"
+        if status == "cancelled":
+            status_line = (f"Your fix request for exception `{fp8}` was **cancelled** "
+                           "before Chisel picked it up")
+        else:
+            status_line = f"Fix attempt **{status}** for exception `{fp8}`"
         lines = [status_line]
         if discord_message_url:
             lines.append(f"**Exception:** {discord_message_url}")

@@ -33,6 +33,9 @@ exctl [--base-url URL] [--timeout SECONDS] <command> [args...]
   fix                <id>
   fix-status         <job_id> [--json]
   fix-history        <id> [--limit N] [--json]
+  fix-list           [--status S[,S...]|all] [--limit N] [--json]
+                     # default --status pending,running: the live Chisel queue
+  fix-cancel         <job_id> [--json]
 ```
 
 `exctl --help` lists the commands; `exctl <command> --help` documents each flag and
@@ -41,7 +44,7 @@ its default. There is no `purge` command: purge is Discord-only (see
 
 `<id>` accepts either the 8-character short ID shown in group listings or the full
 64-character fingerprint, in upper or lower case. `mute`, `unmute`/`reopen`, `resolve`,
-and `fix` require a bearer token (see below); the read-only commands don't.
+`fix` and `fix-cancel` require a bearer token (see below); the read-only commands don't.
 
 `--json` works on every command, read or mutating, and prints the raw API response
 for scripting instead of the default human-readable text. Timestamps in the default
@@ -75,6 +78,13 @@ exctl resolve 95daa028
 exctl fix 95daa028          # prints a job ID
 exctl fix-status <job_id>
 exctl fix-history 95daa028
+
+# Is Chisel keeping up? What's queued or in flight across every group?
+exctl fix-list
+exctl fix-list --status failure --limit 10
+
+# Withdraw a job that hasn't been claimed yet (a running one can't be cancelled)
+exctl fix-cancel <job_id>
 ```
 
 ## Reaching the server
@@ -92,7 +102,7 @@ configured proxy can't make a reachable server look unreachable.
 
 ## Getting a token
 
-Mutating commands (`mute`, `unmute`, `reopen`, `resolve`, `fix`) require a bearer
+Mutating commands (`mute`, `unmute`, `reopen`, `resolve`, `fix`, `fix-cancel`) require a bearer
 token that proves which Discord account you are. Run `/api-token create` in Discord
 (optionally with a `lifetime_hours` argument). It replies ephemerally with a token,
 shown once, and its expiry. Set it as `$EXCTL_API_TOKEN`:

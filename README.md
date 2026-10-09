@@ -269,7 +269,8 @@ to automatically fix that exception and open a pull request.
 }
 ```
 
-Any other `status` is rejected with `400`, and an unknown `job_id` with `404`. `pr_url` is only
+Any other `status` is rejected with `400`, an unknown `job_id` with `404`, and a job that was
+cancelled before Chisel claimed it with `409`. `pr_url` is only
 meaningful when `status` is `"success"`. `detail` is stored in the `fix_attempts` table but is
 neither DMed to the requester nor served by the API.
 
@@ -289,7 +290,10 @@ If a fix attempt is already pending or running for a group, a second `:wrench:` 
 silently ignored (the wrench is still removed). An attempt that gets no callback within an hour
 is failed automatically, which is what stops a dead job blocking a group forever. Fix attempt
 history is stored in the `fix_attempts` table and available via the `/fix-history` slash command
-or `GET /api/groups/<id>/fix-attempts` (see [NETWORK_API.md](NETWORK_API.md)).
+or `GET /api/groups/<id>/fix-attempts` (see [NETWORK_API.md](NETWORK_API.md)). The queue across
+every group is `GET /api/fix-attempts?status=pending,running` (`exctl fix-list`), and a job
+Chisel hasn't claimed yet can be withdrawn with `POST /api/fix-attempts/<job_id>/cancel`
+(`exctl fix-cancel`). Both are API-only, with no Discord command.
 
 The `fix_exception_prompt.md` template supports these variables. Anything else in `{braces}` is
 left as written, so a brace in an exception message is harmless.
