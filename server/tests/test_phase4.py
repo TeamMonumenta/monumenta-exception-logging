@@ -21,10 +21,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import pytest
 from tracker.config import TrackerConfig
-from tracker.api import GroupDetails, Tracker
+from tracker.api import CauseSummary, FrameSummary, GroupDetails, Tracker
 from tracker.ingest import parse_event
 from bot import (
-    format_exception_message, _build_frames_block, _fmt_new_line, _fmt_summary_line,
+    format_exception_message, _build_frames_block, _fmt_cause_chain_lines,
+    _fmt_details_lines, _fmt_new_line, _fmt_summary_line, _inline_code,
+    _MAX_CAUSE_FRAMES_SHOWN,
 )
 from tests.fixtures import EXAMPLE_EVENT, EXAMPLE_EVENT_2
 
@@ -246,7 +248,6 @@ def test_get_fingerprint_by_short_id_not_found(fresh_api):
 def _make_details(status="active", muted_by=None, muted_at=None,
                   resolved_by=None, resolved_at=None, trace_count=3) -> GroupDetails:
     from datetime import datetime
-    from tracker.api import FrameSummary
     now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     frames = [
         FrameSummary(class_name="com.example.Foo", method="bar", file="Foo.java", line=i)
@@ -323,7 +324,6 @@ def test_format_message_truncation_stays_under_limit():
 def test_format_message_long_exc_line_stays_under_limit():
     # A very long message_template that alone would exceed 2000 chars
     from datetime import datetime
-    from tracker.api import FrameSummary
     now = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
     frames = [FrameSummary(class_name="com.example.Foo", method="bar", file="Foo.java", line=1)]
     details = GroupDetails(
@@ -471,3 +471,117 @@ def test_summary_lines_omit_owning_frame_when_there_is_none(fresh_api):
     g.owning_frame = None
     assert ' at `' not in _fmt_summary_line(g)
     assert ' at `' not in _fmt_new_line(g)
+
+
+def _frame(cls: str, method: str, line: int) -> dict:
+    return {'class_name': cls, 'method': method, 'file': cls.rsplit('.', 1)[-1] + '.java',
+            'line': line, 'location': None}
+
+
+_TICK = _frame('net.minecraft.server.MinecraftServer', 'tickServer', 1525)
+_LOOP = _frame('net.minecraft.server.MinecraftServer', 'runServer', 1226)
+_TASK = _frame('org.bukkit.craftbukkit.scheduler.CraftTask', 'run', 101)
+_APP_RUN = _frame('com.playmonumenta.plugins.Foo$1', 'run', 40)
+_APP_INNER = _frame('com.playmonumenta.plugins.Foo', 'inner', 12)
+
+
+def _wrapped_details(fresh_api) -> GroupDetails:
+    ev = {
+        **EXAMPLE_EVENT,
+        'message': 'Task #7 for Monumenta v11.88.1 generated an exception',
+        'exception': {
+            'class_name': 'com.destroystokyo.paper.exception.ServerSchedulerException',
+            'message': 'Task #7 generated an exception',
+            'frames': [_frame('org.bukkit.craftbukkit.scheduler.CraftScheduler',
+                              'mainThreadHeartbeat', 497), _TICK, _LOOP],
+            'cause': {
+                'class_name': 'java.lang.IllegalStateException',
+                'message': 'boss is gone',
+                'frames': [_APP_RUN, _TASK, _TICK, _LOOP],
+                'cause': {
+                    'class_name': 'java.lang.NullPointerException',
+                    'message': None,
+                    'frames': [_APP_INNER, _APP_RUN, _TASK, _TICK, _LOOP],
+                    'cause': None,
+                },
+            },
+        },
+    }
+    fp, _ = fresh_api.ingest_event(parse_event(ev))
+    details = fresh_api.get_group_details(fp)
+    assert details is not None
+    return details
+
+
+def test_details_lines_render_the_cause_chain_folding_shared_frames(fresh_api):
+    lines = _fmt_details_lines(_wrapped_details(fresh_api))
+    start = lines.index('**Caused by:** `java.lang.IllegalStateException: boss is gone`')
+    assert lines[start:] == [
+        '**Caused by:** `java.lang.IllegalStateException: boss is gone`',
+        '  at com.playmonumenta.plugins.Foo$1.run(Foo$1.java:40)',
+        '  at org.bukkit.craftbukkit.scheduler.CraftTask.run(CraftTask.java:101)',
+        '  ... 2 more',
+        '**Caused by:** `java.lang.NullPointerException`',
+        '  at com.playmonumenta.plugins.Foo.inner(Foo.java:12)',
+        '  ... 4 more',
+    ]
+
+
+def test_details_lines_show_level_and_log_message(fresh_api):
+    lines = _fmt_details_lines(_wrapped_details(fresh_api))
+    assert 'Logger: `com.playmonumenta.plugins.Plugin` [ERROR]' in lines
+    assert 'Logged as: `Task #7 for Monumenta v11.88.1 generated an exception`' in lines
+
+
+def test_details_lines_without_causes_have_no_caused_by(fresh_api):
+    fp, _ = fresh_api.ingest_event(parse_event(EXAMPLE_EVENT))
+    details = fresh_api.get_group_details(fp)
+    assert details is not None
+    assert not any('Caused by' in line for line in _fmt_details_lines(details))
+
+
+def _summary_frame(i: int) -> FrameSummary:
+    return FrameSummary(class_name=f'com.playmonumenta.plugins.F{i}', method='m',
+                        file=f'F{i}.java', line=i)
+
+
+def test_cause_identical_to_its_enclosing_trace_folds_completely(fresh_api):
+    details = _wrapped_details(fresh_api)
+    details.cause_chain = [CauseSummary('java.lang.RuntimeException', '',
+                                        list(details.canonical_trace))]
+    assert _fmt_cause_chain_lines(details) == [
+        '**Caused by:** `java.lang.RuntimeException`',
+        f'  ... {len(details.canonical_trace)} more',
+    ]
+
+
+def test_cause_without_frames_is_just_a_header(fresh_api):
+    details = _wrapped_details(fresh_api)
+    details.cause_chain = [CauseSummary('java.lang.Error', 'x', [])]
+    assert _fmt_cause_chain_lines(details) == ['**Caused by:** `java.lang.Error: x`']
+
+
+def test_deep_unshared_cause_is_capped(fresh_api):
+    """A cause truncated at ingest has lost the tail it shares with its enclosing
+    trace, so nothing folds and the display cap is what bounds it."""
+    details = _wrapped_details(fresh_api)
+    details.cause_chain = [CauseSummary('java.lang.StackOverflowError', '',
+                                        [_summary_frame(i) for i in range(200)])]
+    lines = _fmt_cause_chain_lines(details)
+    assert len(lines) == 1 + _MAX_CAUSE_FRAMES_SHOWN + 1
+    assert lines[-1] == f'  ... {200 - _MAX_CAUSE_FRAMES_SHOWN} more'
+
+
+def test_logged_as_is_skipped_when_it_repeats_the_message(fresh_api):
+    details = _wrapped_details(fresh_api)
+    details.latest_log_message = details.latest_message
+    assert not any(line.startswith('Logged as:') for line in _fmt_details_lines(details))
+
+
+def test_inline_code_survives_backticks_newlines_and_length():
+    out = _inline_code('bad `cmd`\r\nline two')
+    assert out.count('`') == 2
+    assert out.startswith('`') and out.endswith('`')
+    assert '\n' not in out and '\u23ce' in out
+    long = _inline_code('x' * 5000)
+    assert len(long) <= 502 and long.endswith('...`')

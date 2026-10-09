@@ -15,7 +15,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from tracker.api import FixAttemptStatus, GroupDetails, GroupSummary, Tracker
+from tracker.api import (
+    FixAttemptStatus, FrameSummary, GroupDetails, GroupSummary, Tracker,
+)
 from tracker.chisel import FixRequestOutcome, fmt_frame, request_fix
 from tracker.config import TrackerConfig
 
@@ -233,6 +235,62 @@ def _fmt_new_line(g: GroupSummary) -> str:
     )
 
 
+# Frames shown per cause after folding. Ingest keeps the first 200 frames of a
+# cause, and truncation drops exactly the tail it would share with its enclosing
+# trace, so folding alone doesn't bound a deep cause (a StackOverflowError, say).
+_MAX_CAUSE_FRAMES_SHOWN = 30
+
+# Longest exception or log message shown inline in a details view. Messages are
+# uncapped at ingest, and _chunk_lines splits an over-long line blindly, which would
+# cut an inline code span in half.
+_MAX_INLINE_MESSAGE = 500
+
+
+def _inline_code(text: str) -> str:
+    """Render free text (an exception or log message) as one inline code span.
+
+    A backtick in the text would close the span early and newlines break it, so
+    backticks become a lookalike and newlines a visible marker.
+    """
+    text = text.replace("`", "\u02cb").replace("\r\n", "\n").replace("\n", " \u23ce ")
+    if len(text) > _MAX_INLINE_MESSAGE:
+        text = text[:_MAX_INLINE_MESSAGE - 3] + "..."
+    return f"`{text}`"
+
+
+def _shared_tail(frames: list[FrameSummary], enclosing: list[FrameSummary]) -> int:
+    """Number of trailing frames `frames` has in common with `enclosing`."""
+    shared = 0
+    for mine, theirs in zip(reversed(frames), reversed(enclosing)):
+        if mine != theirs:
+            break
+        shared += 1
+    return shared
+
+
+def _fmt_cause_chain_lines(details: GroupDetails) -> list[str]:
+    """`Caused by:` blocks for each cause, outermost first.
+
+    Frames a cause shares with the trace enclosing it are folded into `... N more`,
+    the way Java prints them: a scheduler wrapper's cause otherwise repeats the
+    whole scheduler and tick-loop stack below its app frames. What's left is capped
+    at _MAX_CAUSE_FRAMES_SHOWN per cause; `exctl show` has every stored frame.
+    """
+    lines: list[str] = []
+    enclosing = details.canonical_trace
+    for cause in details.cause_chain:
+        header = cause.class_name + (f": {cause.message}" if cause.message else "")
+        lines.append(f"**Caused by:** {_inline_code(header)}")
+        shared = _shared_tail(cause.frames, enclosing)
+        unique = cause.frames[:len(cause.frames) - shared]
+        lines += [fmt_frame(f) for f in unique[:_MAX_CAUSE_FRAMES_SHOWN]]
+        hidden = shared + max(0, len(unique) - _MAX_CAUSE_FRAMES_SHOWN)
+        if hidden:
+            lines.append(f"  ... {hidden} more")
+        enclosing = cause.frames
+    return lines
+
+
 def _fmt_details_lines(details: GroupDetails) -> list[str]:
     """Build the line list for a group details response."""
     short_id = details.fingerprint[:8]
@@ -244,11 +302,16 @@ def _fmt_details_lines(details: GroupDetails) -> list[str]:
         f"Last seen: <t:{int(details.last_seen.timestamp())}:f>",
         f"Total count: {details.total_count}",
         f"Servers: {', '.join(sorted(details.servers_affected)) or 'none'}",
-        f"Logger: `{details.logger}`",
+        f"Logger: `{details.logger}`" + (f" [{details.level}]" if details.level else ""),
     ]
     if details.latest_message:
-        lines.append(f"Latest message: `{details.latest_message}`")
+        lines.append(f"Latest message: {_inline_code(details.latest_message)}")
+    # The accompanying log line is often the only place the real context is, e.g.
+    # Paper's "Could not pass event X to Monumenta v11.88.1".
+    if details.latest_log_message and details.latest_log_message != details.latest_message:
+        lines.append(f"Logged as: {_inline_code(details.latest_log_message)}")
     lines += ["**Stack trace:**"] + [fmt_frame(f) for f in details.canonical_trace]
+    lines += _fmt_cause_chain_lines(details)
     if details.status == "muted" and details.muted_by:
         ts = int(details.muted_at.timestamp()) if details.muted_at else 0
         lines.insert(1, f"Muted by {details.muted_by} on <t:{ts}:f>")

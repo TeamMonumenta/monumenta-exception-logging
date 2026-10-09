@@ -189,7 +189,7 @@ Command names are prefixed by `SLASH_COMMAND_PREFIX` (default: empty, so names a
 | `/server` | `name` | 20 | Top active groups for a specific server |
 | `/muted` | - | 20 | List muted groups |
 | `/resolved` | - | 20 | List resolved groups |
-| `/details` | `short_id` | n/a (single group) | Full details with stack trace, affected servers, latest raw message, and mute/resolve attribution |
+| `/details` | `short_id` | n/a (single group) | Full details with stack trace and cause chain (frames shared with the enclosing trace folded into `... N more`, at most 30 more per cause), affected servers, latest raw message and log line, and mute/resolve attribution |
 | `/fix-history` | `short_id` | 20 | Chisel fix attempt history for a group |
 | `/mute` | `short_id` | n/a | Mute a group |
 | `/unmute` | `short_id` | n/a | Unmute a group |
