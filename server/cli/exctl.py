@@ -37,7 +37,6 @@ _MUTATE_ROUTES = {
     'unmute': 'unmute',
     'reopen': 'unmute',
     'resolve': 'resolve',
-    'fix': 'fix',
 }
 
 
@@ -351,10 +350,13 @@ _LIST_DESCRIPTIONS = {
 }
 
 _MUTATE_DESCRIPTIONS = {
-    'mute': "Mute a group: it keeps collecting occurrences but is hidden from active listings.",
-    'unmute': "Return a group to active. Also un-resolves it, matching Discord's /unmute.",
+    'mute': ("Mute one or more groups: they keep collecting occurrences but are hidden "
+             "from active listings."),
+    'unmute': ("Return one or more groups to active. Also un-resolves them, matching "
+               "Discord's /unmute."),
     'reopen': "Alias for `unmute`.",
-    'resolve': "Mark a group resolved. It ages out naturally after the retention window.",
+    'resolve': ("Mark one or more groups resolved. They age out naturally after the "
+                "retention window."),
     'fix': "Ask Chisel to attempt an automated fix and open a pull request.",
 }
 
@@ -421,11 +423,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="List every server that has ever reported an exception.")
     sp_servers.add_argument('--json', action='store_true', help=_JSON_HELP)
 
-    for name in ('mute', 'unmute', 'reopen', 'resolve', 'fix'):
+    for name in ('mute', 'unmute', 'reopen', 'resolve'):
         description = _MUTATE_DESCRIPTIONS[name]
         sp = sub.add_parser(name, help=description, description=description)
-        sp.add_argument('id', help=_ID_HELP)
-        sp.add_argument('--json', action='store_true', help=_JSON_HELP)
+        sp.add_argument('ids', nargs='+', metavar='id',
+                        help=_ID_HELP + "; several may be given")
+        sp.add_argument('--json', action='store_true',
+                        help=_JSON_HELP + " (one object per line, one line per id)")
+
+    # Deliberately one id at a time: each fix request is a Chisel job and a PR.
+    sp_fix = sub.add_parser('fix', help=_MUTATE_DESCRIPTIONS['fix'],
+                            description=_MUTATE_DESCRIPTIONS['fix'])
+    sp_fix.add_argument('id', help=_ID_HELP)
+    sp_fix.add_argument('--json', action='store_true', help=_JSON_HELP)
 
     sp_fix_status = sub.add_parser(
         'fix-status', help="Check one fix attempt by job ID.",
@@ -545,22 +555,83 @@ def _require_token() -> Optional[str]:
     return token
 
 
+def dedupe_ids(ids: list[str]) -> list[str]:
+    """Drop repeated ids, case-insensitively, keeping the first spelling and order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for id_ in ids:
+        if id_.lower() not in seen:
+            seen.add(id_.lower())
+            result.append(id_)
+    return result
+
+
+# Errors that would fail every remaining id the same way: no server, or a token
+# the server won't accept. Mutation routes check the group before the token, so
+# without stopping on 401 a bad token reads as a mix of 404s and 401s per id.
+_ABORTING_STATUSES = (None, 401, 403)
+
+
 def _cmd_mutate(args: argparse.Namespace, base_url: str, timeout: int) -> int:
+    """mute/unmute/reopen/resolve over one or more ids, one API call each.
+
+    An error on one id (typically an unknown or expired group) is reported and the
+    rest still run; the exit status is 1 if any failed. An error that would fail
+    every id (see _ABORTING_STATUSES), or Ctrl-C, stops the run and lists the ids
+    not done, so a long run can be resumed without rebuilding the list.
+    """
     token = _require_token()
     if token is None:
         return 1
     route = _MUTATE_ROUTES[args.command]
+    verb = _MUTATE_VERBS[args.command]
+    ids = dedupe_ids(args.ids)
+    failed: list[str] = []
+    for i, id_ in enumerate(ids):
+        try:
+            result = request(
+                base_url, 'POST', f'/api/groups/{quote_id(id_)}/{route}', timeout, token=token,
+            )
+        except ApiError as e:
+            if e.status in _ABORTING_STATUSES:
+                _print_not_done(ids[i:])
+                raise
+            print(f"error: {id_}: {e}", file=sys.stderr, flush=True)
+            failed.append(id_)
+            continue
+        except KeyboardInterrupt:
+            _print_not_done(ids[i:])
+            raise
+        # Flushed per line so a `2>&1 | tee` log keeps errors beside their neighbours.
+        if args.json:
+            print(json.dumps(result), flush=True)
+        else:
+            print(f"{verb} {result['fingerprint'][:8]} (status: {result['status']})",
+                  flush=True)
+    if len(ids) > 1:
+        summary = f"{verb} {len(ids) - len(failed)} of {len(ids)}"
+        if failed:
+            summary += f"; failed: {' '.join(failed)}"
+        # stderr, so --json output stays one object per line.
+        print(summary, file=sys.stderr)
+    return 1 if failed else 0
+
+
+def _print_not_done(ids: list[str]) -> None:
+    print(f"stopped; not done: {' '.join(ids)}", file=sys.stderr, flush=True)
+
+
+def _cmd_fix(args: argparse.Namespace, base_url: str, timeout: int) -> int:
+    token = _require_token()
+    if token is None:
+        return 1
     result = request(
-        base_url, 'POST', f'/api/groups/{quote_id(args.id)}/{route}', timeout, token=token,
+        base_url, 'POST', f'/api/groups/{quote_id(args.id)}/fix', timeout, token=token,
     )
     if args.json:
         print(json.dumps(result))
         return 0
-    if args.command == 'fix':
-        print(f"Fix requested for {args.id}: job {result['job_id']}")
-    else:
-        print(f"{_MUTATE_VERBS[args.command]} {result['fingerprint'][:8]} "
-              f"(status: {result['status']})")
+    print(f"Fix requested for {args.id}: job {result['job_id']}")
     return 0
 
 
@@ -627,7 +698,7 @@ _HANDLERS = {
     'servers': _cmd_servers,
     'health': _cmd_health,
     'mute': _cmd_mutate, 'unmute': _cmd_mutate, 'reopen': _cmd_mutate,
-    'resolve': _cmd_mutate, 'fix': _cmd_mutate,
+    'resolve': _cmd_mutate, 'fix': _cmd_fix,
     'fix-status': _cmd_fix_status,
     'fix-history': _cmd_fix_history,
     'fix-list': _cmd_fix_list,

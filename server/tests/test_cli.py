@@ -14,6 +14,7 @@ dependency-free, like the script itself.
 import sys
 import os
 import io
+import json
 import urllib.error
 import urllib.request
 
@@ -124,12 +125,26 @@ def test_parser_show_requires_id():
     assert args.id == 'deadbeef'
 
 
-def test_parser_mutate_commands_take_id():
+def test_parser_status_mutations_take_one_or_more_ids():
     parser = exctl.build_parser()
-    for cmd in ('mute', 'unmute', 'reopen', 'resolve', 'fix'):
+    for cmd in ('mute', 'unmute', 'reopen', 'resolve'):
         args = parser.parse_args([cmd, 'deadbeef'])
         assert args.command == cmd
-        assert args.id == 'deadbeef'
+        assert args.ids == ['deadbeef']
+        assert parser.parse_args([cmd, 'a', 'b']).ids == ['a', 'b']
+        with pytest.raises(SystemExit):
+            parser.parse_args([cmd])
+
+
+def test_parser_fix_takes_exactly_one_id():
+    parser = exctl.build_parser()
+    assert parser.parse_args(['fix', 'deadbeef']).id == 'deadbeef'
+    with pytest.raises(SystemExit):
+        parser.parse_args(['fix', 'a', 'b'])
+
+
+def test_dedupe_ids_is_case_insensitive_and_keeps_order():
+    assert exctl.dedupe_ids(['b', 'A', 'a', 'B', 'c']) == ['b', 'A', 'c']
 
 
 def test_parser_fix_status_takes_job_id():
@@ -652,3 +667,128 @@ def test_fmt_occurrence_line_shows_log_message_only_when_it_differs():
     assert exctl.fmt_occurrence_line({**base, 'log_message': 'boom'}).endswith('boom')
     assert exctl.fmt_occurrence_line(
         {**base, 'log_message': 'Task #42 failed'}).endswith('boom  [Task #42 failed]')
+
+
+def _fake_mutations(fail: dict[str, Exception]):
+    """request() stand-in: echoes a group for each id, or raises the given error."""
+    calls: list[str] = []
+
+    def _fake(base_url, method, path, timeout, body=None, token=None):
+        # pylint: disable=unused-argument
+        id_ = path.split('/')[3]
+        calls.append(id_)
+        if id_ in fail:
+            raise fail[id_]
+        return {'fingerprint': id_ + '0' * 56, 'status': 'resolved'}
+
+    return _fake, calls
+
+
+def test_resolve_several_ids(monkeypatch, capsys):
+    fake, calls = _fake_mutations({})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    args = exctl.build_parser().parse_args(
+        ['resolve', 'aaaaaaaa', 'bbbbbbbb', 'AAAAAAAA'])
+    assert HANDLERS['resolve'](args, "http://x", 30) == 0
+    assert calls == ['aaaaaaaa', 'bbbbbbbb']
+    out = capsys.readouterr().out.splitlines()
+    assert out == ['Resolved aaaaaaaa (status: resolved)', 'Resolved bbbbbbbb (status: resolved)']
+
+
+def test_resolve_continues_past_a_bad_id_and_exits_nonzero(monkeypatch, capsys):
+    fake, calls = _fake_mutations({'bbbbbbbb': exctl.ApiError('group not found', status=404)})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    args = exctl.build_parser().parse_args(['resolve', 'aaaaaaaa', 'bbbbbbbb', 'cccccccc'])
+    assert HANDLERS['resolve'](args, "http://x", 30) == 1
+    assert calls == ['aaaaaaaa', 'bbbbbbbb', 'cccccccc']
+    captured = capsys.readouterr()
+    assert 'error: bbbbbbbb: group not found' in captured.err
+    assert 'Resolved cccccccc' in captured.out
+
+
+def test_resolve_stops_when_the_server_is_unreachable(monkeypatch, capsys):
+    fake, calls = _fake_mutations(
+        {'aaaaaaaa': exctl.ApiError('could not reach http://x: refused')})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['--base-url', 'http://x', 'resolve', 'aaaaaaaa', 'bbbbbbbb']) == 1
+    assert calls == ['aaaaaaaa']
+    assert 'could not reach' in capsys.readouterr().err
+
+
+def test_resolve_json_prints_one_object_per_line(monkeypatch, capsys):
+    fake, _calls = _fake_mutations({})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    args = exctl.build_parser().parse_args(['mute', 'aaaaaaaa', 'bbbbbbbb', '--json'])
+    assert HANDLERS['mute'](args, "http://x", 30) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)['fingerprint'][:8] for line in lines] == ['aaaaaaaa', 'bbbbbbbb']
+
+
+def test_resolve_summary_goes_to_stderr(monkeypatch, capsys):
+    fake, _calls = _fake_mutations({'bbbbbbbb': exctl.ApiError('group not found', status=404)})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['resolve', 'aaaaaaaa', 'bbbbbbbb', 'cccccccc']) == 1
+    captured = capsys.readouterr()
+    assert 'Resolved 2 of 3; failed: bbbbbbbb' in captured.err
+    assert 'of 3' not in captured.out
+
+
+def test_single_id_prints_no_summary(monkeypatch, capsys):
+    fake, _calls = _fake_mutations({})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['resolve', 'aaaaaaaa']) == 0
+    assert capsys.readouterr().err == ''
+
+
+def test_resolve_stops_on_a_rejected_token(monkeypatch, capsys):
+    fake, calls = _fake_mutations(
+        {'bbbbbbbb': exctl.ApiError('invalid or expired token', status=401)})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['resolve', 'aaaaaaaa', 'bbbbbbbb', 'cccccccc']) == 1
+    assert calls == ['aaaaaaaa', 'bbbbbbbb']
+    err = capsys.readouterr().err
+    assert 'stopped; not done: bbbbbbbb cccccccc' in err
+    assert 'invalid or expired token' in err
+
+
+def test_resolve_interrupted_lists_what_is_left(monkeypatch, capsys):
+    fake, calls = _fake_mutations({'bbbbbbbb': KeyboardInterrupt()})  # type: ignore[dict-item]
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['resolve', 'aaaaaaaa', 'bbbbbbbb', 'cccccccc']) == 130
+    assert calls == ['aaaaaaaa', 'bbbbbbbb']
+    err = capsys.readouterr().err
+    assert 'stopped; not done: bbbbbbbb cccccccc' in err
+
+
+def test_resolve_json_with_a_failure_keeps_stdout_clean(monkeypatch, capsys):
+    fake, _calls = _fake_mutations({'bbbbbbbb': exctl.ApiError('group not found', status=404)})
+    monkeypatch.setattr(exctl, 'request', fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['resolve', 'aaaaaaaa', 'bbbbbbbb', '--json']) == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert [json.loads(line)['fingerprint'][:8] for line in lines] == ['aaaaaaaa']
+
+
+def test_fix_prints_the_job_id(monkeypatch, capsys):
+    calls: list[str] = []
+
+    def _fake(base_url, method, path, timeout, body=None, token=None):
+        # pylint: disable=unused-argument
+        calls.append(path)
+        return {'job_id': 'job-1'}
+
+    monkeypatch.setattr(exctl, 'request', _fake)
+    monkeypatch.setenv('EXCTL_API_TOKEN', 'tok')
+    assert exctl.main(['fix', 'deadbeef']) == 0
+    assert calls == ['/api/groups/deadbeef/fix']
+    assert capsys.readouterr().out == 'Fix requested for deadbeef: job job-1\n'
+    assert exctl.main(['fix', 'deadbeef', '--json']) == 0
+    assert json.loads(capsys.readouterr().out) == {'job_id': 'job-1'}
