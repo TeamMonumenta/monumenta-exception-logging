@@ -380,24 +380,27 @@ next rule's input.
 | 4 | Plugin version | `<version>` | `\bv?\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{4,}\|-SNAPSHOT)+\b`; catches `git describe` strings like `v11.80.2-1-gf114425-SNAPSHOT` |
 | 5 | Long opaque token | `<id>` | 32 or more `[A-Za-z0-9_-]` characters: CDN/WAF request IDs, auth tokens, hashes |
 | 6 | Guild permission key | `guild.<id>` | `guild.<name>.<role>`, e.g. `guild.nova+.member`, `guild.lads.member` |
-| 7 | Any number | `<N>` | `\d+(?:\.\d+)*` - **every** run of digits, not just long ones: coordinates, entity IDs, counts, single digits |
-| 8 | World names in "measure distance between X and Y" | `<world1>`, `<world2>` | e.g. `plot3769`, `ringinstance101` |
-| 9 | Quoted string | `<str>` | `'...'` or `"..."` up to 64 characters; entity names, class names in NPE messages. A single quote preceded by a word character does not open a match, so an apostrophe in prose is not mistaken for a quote. |
-| 10 | Bracketed data | `<data>` | `[...]` up to 256 characters, innermost brackets only; boss tag lists, NBT |
-| 11 | `Location{world=...{...}...}` block | `Location{<location>}` | one level of nested braces |
+| 7 | Player name | `Player <player>` | `\bPlayer [A-Za-z0-9_]{1,16}(?= is\b)`: a Minecraft username between `Player ` and ` is`, as in redis-sync's "Player Moxiangbei is not this player's current connection on this shard" |
+| 8 | Any number | `<N>` | `\d+(?:\.\d+)*` - **every** run of digits, not just long ones: coordinates, entity IDs, counts, single digits |
+| 9 | World names in "measure distance between X and Y" | `<world1>`, `<world2>` | e.g. `plot3769`, `ringinstance101` |
+| 10 | Quoted string | `<str>` | `'...'` or `"..."` up to 64 characters; entity names, class names in NPE messages. A single quote preceded by a word character does not open a match, so an apostrophe in prose is not mistaken for a quote. |
+| 11 | Bracketed data | `<data>` | `[...]` up to 256 characters, innermost brackets only; boss tag lists, NBT |
+| 12 | `Location{world=...{...}...}` block | `Location{<location>}` | one level of nested braces |
 
-The order matters in four places:
+The order matters in five places:
 
 - Bare UUIDs (2) are consumed before long tokens (5), so a 32-hex-character UUID always
   becomes `<uuid>` rather than `<id>`.
-- Versions (4) are consumed before numbers (7), so the abbreviated git hash is not
+- Versions (4) are consumed before numbers (8), so the abbreviated git hash is not
   fragmented into `g<N>` noise.
-- Guild keys (6) are consumed before numbers (7), so guild names containing digits still
+- Guild keys (6) are consumed before numbers (8), so guild names containing digits still
   collapse to a single token.
-- World names (8) are matched *after* numbers (7), because a numeric world name has
+- Player names (7) are consumed before numbers (8), so a name like `TheAo2` collapses as a
+  whole rather than leaving `TheAo<N>`.
+- World names (9) are matched *after* numbers (8), because a numeric world name has
   already become `plot<N>` by that point and the rule's character class allows `<` and `>`.
 
-Rule 10 matching innermost brackets only means normalization is **not idempotent**:
+Rule 11 matching innermost brackets only means normalization is **not idempotent**:
 re-normalizing an already-normalized message peels one more nesting level each pass
 (`[x=1, y=2, z=[a, b]]` -> `[x=<N>, y=<N>, z=<data>]` -> `<data>`). That is the reason
 `signature` exists; see "Regrouping".

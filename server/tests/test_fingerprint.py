@@ -330,6 +330,32 @@ class TestNormalizeMessage:
         assert 'guild.<id>' in result
         assert 'team123' not in result
 
+    def test_player_name_replaced(self):
+        msg = "Player Moxiangbei is not this player's current connection on this shard"
+        assert normalize_message(msg) == (
+            "Player <player> is not this player's current connection on this shard")
+
+    def test_player_names_produce_same_normalized_form(self):
+        # From production: one redis-sync throw site split into a group per player.
+        tail = " is not this player's current connection on this shard"
+        names = ['Moxiangbei', 'qlsj', 'TheAo2', 'FRAN_TK1217', 'ekuru_']
+        assert len({normalize_message('Player ' + n + tail) for n in names}) == 1
+
+    def test_player_name_needs_the_word_is_after_it(self):
+        # Only "Player <name> is" is a player name; other uses of the word are left alone.
+        for msg in ['Player Moxiangbei disconnected', 'Player Foo isolated', "Player Foo isn't online"]:
+            assert normalize_message(msg) == msg
+
+    def test_player_needs_word_boundary_before_it(self):
+        msg = 'NPCPlayer Foo is missing'
+        assert normalize_message(msg) == msg
+
+    def test_player_name_length_limits(self):
+        # Minecraft usernames are at most 16 characters.
+        assert normalize_message('Player ABCDEFGHIJKLMNOP is offline') == 'Player <player> is offline'
+        msg = 'Player ABCDEFGHIJKLMNOPQ is offline'
+        assert normalize_message(msg) == msg
+
 
 # ===========================================================================
 # extract_app_frames

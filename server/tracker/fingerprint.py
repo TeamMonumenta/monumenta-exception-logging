@@ -30,6 +30,9 @@ _BRACKET_DATA_RE = re.compile(r'\[[^\[\]]{0,256}\]')
 _LOCATION_BLOCK_RE = re.compile(r'Location\{world\=\w+\{[^\{\}]+\}[^\{\}]+\}')
 # Matches dotted guild permission keys like guild.nova+.member, guild.lads.member.
 _GUILD_ID_RE = re.compile(r'guild\.[A-Za-z0-9+_-]+\.[A-Za-z0-9+_-]+')
+# A Minecraft username after "Player " and before " is", e.g. redis-sync's
+# "Player Moxiangbei is not this player's current connection on this shard".
+_PLAYER_NAME_RE = re.compile(r'\bPlayer [A-Za-z0-9_]{1,16}(?= is\b)')
 
 
 def normalize_message(message: str) -> str:
@@ -43,6 +46,8 @@ def normalize_message(message: str) -> str:
     s = _LONG_TOKEN_RE.sub('<id>', s)
     # Guild permission keys before number replacement so names with digits also collapse.
     s = _GUILD_ID_RE.sub('guild.<id>', s)
+    # Player names before number replacement so names with digits (TheAo2) also collapse.
+    s = _PLAYER_NAME_RE.sub('Player <player>', s)
     s = _NUM_RE.sub('<N>', s)
     # World distance after number replacement so numeric world names (plot<N>) still match.
     s = _WORLD_DISTANCE_RE.sub(r'\1<world1>\2<world2>', s)

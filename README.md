@@ -139,6 +139,7 @@ bug always groups together. The rules are applied in this order:
 | Plugin version (`git describe`) | `<version>` | `v11.80.2-1-gf114425-SNAPSHOT` |
 | Long opaque token (32+ `[A-Za-z0-9_-]` chars) | `<id>` | CDN/WAF request IDs, auth tokens, hashes |
 | Guild permission key (`guild.<name>.<role>`) | `guild.<id>` | `guild.nova+.member`, `guild.lads.member` |
+| Player name in "Player `<name>` is" | `Player <player>` | `Player Moxiangbei is not this player's current connection` |
 | Any run of digits | `<N>` | coordinates, entity IDs, task IDs, counts |
 | World names after "measure distance between ... and ..." | `<world1>`, `<world2>` | `plot3769`, `ringinstance101` |
 | Quoted string (single or double) | `<str>` | entity names, class names in NPE messages |
