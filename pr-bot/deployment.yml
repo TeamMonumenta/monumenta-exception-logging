@@ -55,6 +55,15 @@ spec:
       labels:
         app: pr-bot
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - monumenta-18
       volumes:
         - name: pr-bot-storage
           hostPath:
